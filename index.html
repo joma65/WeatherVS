@@ -294,49 +294,55 @@
                 else bgClass = 'bg-gradient-to-br from-indigo-900 to-gray-950'; // Clear Night
             }
 
+            const textShadow = `drop-shadow-[0_0.2px_1.4px_rgba(0,0,0,1)]`;
+            const textContrast = {
+                mainText: `text-white ${textShadow} mx-0.5`,
+                subText: `text-blue-100 ${textShadow} mx-0.5`,
+            };
+
             // Apply styling
-            element.className = `weather-card rounded-2xl shadow-lg overflow-hidden flex flex-col justify-between ${bgClass} text-white`;
+            element.className = `weather-card rounded-2xl drop-shadow-lg overflow-hidden flex flex-col justify-between ${bgClass}`;
 
             element.innerHTML = `
-                <div class="p-3 md:p-6 flex-grow">
-                    <div class="flex flex-col md:flex-row md:justify-between md:items-start mb-4 md:mb-6">
-                        <div class="overflow-hidden">
-                            <h2 class="text-lg md:text-2xl font-bold text-white truncate drop-shadow-sm" title="${data.name}">${data.name}</h2>
-                            <p class="text-xs md:text-sm font-medium text-blue-50 uppercase tracking-wide truncate opacity-90">${data.sys.country}</p>
-                        </div>
-                        <span class="mt-1 md:mt-0 self-start px-2 py-0.5 md:px-3 md:py-1 bg-white/20 backdrop-blur-md text-white rounded-full text-[10px] md:text-xs font-bold flex items-center gap-1 border border-white/20">
-                            <i data-lucide="clock" class="w-3 h-3"></i> ${localTimeStr}
-                        </span>
+            <div class="p-3 md:p-6 flex-grow">
+                <div class="flex flex-col md:flex-row md:justify-between md:items-start mb-4 md:mb-6">
+                    <div class="overflow-hidden">
+                        <h2 class="text-lg md:text-2xl font-bold ${textContrast.mainText} truncate" title="${data.name}">${data.name}</h2>
+                        <p class="text-xs md:text-sm font-medium ${textContrast.subText} uppercase tracking-wide truncate opacity-90">${data.sys.country}</p>
                     </div>
-                    <div class="flex flex-col md:flex-row items-center justify-between mb-4 md:mb-8">
-                        <div class="flex flex-col items-center md:items-start">
-                            <span class="text-4xl md:text-6xl font-black text-white tracking-tighter drop-shadow-md">${mainTemp}</span>
-                            <span class="text-blue-100 font-medium text-sm md:text-lg">${subTemp}</span>
-                        </div>
-                        <img src="${iconUrl}" alt="${data.weather[0].description}" class="w-16 h-16 md:w-24 md:h-24 md:-mr-4 drop-shadow-md filter brightness-110">
+                    <span class="mt-1 md:mt-0 self-start px-2 py-0.5 md:px-3 md:py-1 bg-white/20 backdrop-blur-md ${textContrast.mainText} rounded-full text-[10px] md:text-xs font-bold flex items-center gap-1 border border-white/20">
+                        <i data-lucide="clock" class="w-3 h-3"></i> ${localTimeStr}
+                    </span>
+                </div>
+                <div class="flex flex-col md:flex-row items-center justify-between mb-4 md:mb-8">
+                    <div class="flex flex-col items-center md:items-start">
+                        <span class="text-4xl md:text-6xl font-black ${textContrast.mainText} tracking-tighter">${mainTemp}</span>
+                        <span class="${textContrast.subText} font-medium text-sm md:text-lg">${subTemp}</span>
                     </div>
-                    
-                    <!-- Stats Grid (Glassmorphism) -->
-                    <div class="bg-white/10 backdrop-blur-md rounded-xl p-2 md:p-4 grid grid-cols-1 xl:grid-cols-2 gap-2 md:gap-4 border border-white/10">
+                    <img src="${iconUrl}" alt="${data.weather[0].description}" class="w-16 h-16 md:w-24 md:h-24 md:-mr-4 drop-shadow-md filter brightness-110">
+                </div>
+                
+                <!-- Stats Grid (Glassmorphism) -->
+                <div class="bg-white/10 backdrop-blur-md rounded-xl p-2 md:p-4 grid grid-cols-1 xl:grid-cols-2 gap-2 md:gap-4 border border-white/10">
+                    <div class="flex items-center gap-2 md:gap-3">
+                        <div class="p-1.5 md:p-2 bg-white/20 ${textContrast.mainText} rounded-lg shrink-0"><i data-lucide="droplets" class="w-4 h-4 md:w-5 md:h-5"></i></div>
+                        <div class="min-w-0"><p class="text-[10px] md:text-xs ${textContrast.subText} font-bold uppercase truncate">Humidity</p><p class="font-semibold text-sm md:text-base ${textContrast.mainText}">${data.main.humidity}%</p></div>
+                    </div>
+                    <div class="flex items-center gap-2 md:gap-3">
+                        <div class="p-1.5 md:p-2 bg-white/20 ${textContrast.mainText} rounded-lg shrink-0"><i data-lucide="wind" class="w-4 h-4 md:w-5 md:h-5"></i></div>
+                        <div class="min-w-0"><p class="text-[10px] md:text-xs ${textContrast.subText} font-bold uppercase truncate">Wind</p><p class="font-semibold text-sm md:text-base ${textContrast.mainText} truncate">${mainWindSpeed} <span class="text-[10px] md:text-xs">${mainWindUnit}</span></p></div>
+                    </div>
                         <div class="flex items-center gap-2 md:gap-3">
-                            <div class="p-1.5 md:p-2 bg-white/20 text-white rounded-lg shrink-0"><i data-lucide="droplets" class="w-4 h-4 md:w-5 md:h-5"></i></div>
-                            <div class="min-w-0"><p class="text-[10px] md:text-xs text-blue-100 font-bold uppercase truncate">Humidity</p><p class="font-semibold text-sm md:text-base text-white">${data.main.humidity}%</p></div>
-                        </div>
+                        <div class="p-1.5 md:p-2 bg-white/20 ${textContrast.mainText} rounded-lg shrink-0"><i data-lucide="thermometer" class="w-4 h-4 md:w-5 md:h-5"></i></div>
+                        <div class="min-w-0"><p class="text-[10px] md:text-xs ${textContrast.subText} font-bold uppercase truncate">Feels Like</p><p class="font-semibold text-sm md:text-base ${textContrast.mainText}">${mainFeelsLike}</p></div>
+                    </div>
                         <div class="flex items-center gap-2 md:gap-3">
-                            <div class="p-1.5 md:p-2 bg-white/20 text-white rounded-lg shrink-0"><i data-lucide="wind" class="w-4 h-4 md:w-5 md:h-5"></i></div>
-                            <div class="min-w-0"><p class="text-[10px] md:text-xs text-blue-100 font-bold uppercase truncate">Wind</p><p class="font-semibold text-sm md:text-base text-white truncate">${mainWindSpeed} <span class="text-[10px] md:text-xs">${mainWindUnit}</span></p></div>
-                        </div>
-                         <div class="flex items-center gap-2 md:gap-3">
-                            <div class="p-1.5 md:p-2 bg-white/20 text-white rounded-lg shrink-0"><i data-lucide="thermometer" class="w-4 h-4 md:w-5 md:h-5"></i></div>
-                            <div class="min-w-0"><p class="text-[10px] md:text-xs text-blue-100 font-bold uppercase truncate">Feels Like</p><p class="font-semibold text-sm md:text-base text-white">${mainFeelsLike}</p></div>
-                        </div>
-                         <div class="flex items-center gap-2 md:gap-3">
-                            <div class="p-1.5 md:p-2 bg-white/20 text-white rounded-lg shrink-0"><i data-lucide="eye" class="w-4 h-4 md:w-5 md:h-5"></i></div>
-                            <div class="min-w-0"><p class="text-[10px] md:text-xs text-blue-100 font-bold uppercase truncate">Condition</p><p class="font-semibold text-white capitalize text-sm md:text-base truncate max-w-[80px]">${data.weather[0].main}</p></div>
-                        </div>
+                        <div class="p-1.5 md:p-2 bg-white/20 ${textContrast.mainText} rounded-lg shrink-0"><i data-lucide="eye" class="w-4 h-4 md:w-5 md:h-5"></i></div>
+                        <div class="min-w-0"><p class="text-[10px] md:text-xs ${textContrast.subText} font-bold uppercase truncate">Condition</p><p class="font-semibold ${textContrast.mainText} capitalize text-sm md:text-base truncate max-w-[80px]">${data.weather[0].main}</p></div>
                     </div>
                 </div>
-            `;
+            </div>
+        `;
         }
         function showError(msg) { errorMsg.textContent = msg; errorMsg.classList.remove('hidden'); const form = document.querySelector('.bg-white.rounded-2xl'); form.animate([{ transform: 'translateX(0)' }, { transform: 'translateX(-5px)' }, { transform: 'translateX(5px)' }, { transform: 'translateX(0)' }], { duration: 300 }); }
         function hideError() { errorMsg.classList.add('hidden'); }
