@@ -1,5 +1,5 @@
 // Updated version to force cache refresh for new UI
-const CACHE_NAME = 'weather-compare-v3';
+const CACHE_NAME = 'weather-compare-v6';
 const ASSETS_TO_CACHE = [
   './',
 './index.html',

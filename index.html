@@ -48,6 +48,7 @@
         .card-face {
             grid-area: 1 / 1;
             position: relative;
+            min-width: 0;
             border-radius: 1rem;
             overflow: hidden;
             display: flex;
@@ -56,9 +57,37 @@
             -webkit-backface-visibility: hidden;
             transform: translateZ(0);
         }
+        .card-face > .face-body { flex: 1 1 auto; min-height: 0; }
         .card-back {
             transform: rotateY(180deg) translateZ(0);
             -webkit-transform: rotateY(180deg) translateZ(0);
+        }
+
+        /* --- Trend (back face) layout ---
+           Absolutely positioned slots: the card face is a definite-height grid item, so
+           top/bottom offsets give the chart host the card's REAL leftover height on both
+           the short desktop card and the tall single-column mobile card. No percentage
+           height chain involved. */
+        .trend-header { position: absolute; top: 12px; left: 12px; right: 12px; z-index: 10; }
+        .trend-footer { position: absolute; bottom: 10px; left: 12px; right: 12px; z-index: 10; }
+        .chart-host {
+            position: absolute;
+            top: 54px;
+            bottom: 32px;
+            left: 12px;
+            right: 12px;
+            z-index: 10;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .chart-host svg { display: block; width: 100%; height: 100%; }
+
+        @media (min-width: 768px) {
+            .trend-header { top: 18px; left: 20px; right: 20px; }
+            .trend-footer { bottom: 14px; left: 20px; right: 20px; }
+            .chart-host { top: 66px; bottom: 42px; left: 20px; right: 20px; }
         }
 
         body { overscroll-behavior-y: none; }
@@ -156,7 +185,7 @@
         </div>
 
         <!-- Results Display -->
-        <div id="resultsArea" class="hidden grid grid-cols-2 gap-2 md:gap-6 relative">
+        <div id="resultsArea" class="hidden grid grid-cols-2 gap-2 md:gap-6 relative items-stretch">
             <div class="hidden md:flex absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-12 h-12 bg-white rounded-full shadow-lg items-center justify-center z-10 border-4 border-slate-50 text-slate-400 font-black text-sm">VS</div>
             <div id="card1" class="weather-card rounded-2xl drop-shadow-lg cursor-pointer select-none"></div>
             <div id="card2" class="weather-card rounded-2xl drop-shadow-lg cursor-pointer select-none"></div>
@@ -269,6 +298,8 @@
             card.setAttribute('aria-label', flipped
                 ? `${card.dataset.cityName || 'City'} 6 hour temperature trend. Activate to flip back.`
                 : `${card.dataset.cityName || 'City'} current weather. Activate for the 6 hour temperature trend.`);
+            // The chart is measured/drawn while the back face is hidden, so force a redraw
+            refreshChart(card);
         }
 
         function updateKeyStatus() {
@@ -289,6 +320,7 @@
                 currentData1 = data1; currentData2 = data2;
                 renderCard(card1, data1); renderCard(card2, data2);
                 loadingState.classList.add('hidden'); resultsArea.classList.remove('hidden'); lucide.createIcons();
+                refreshChart(card1); refreshChart(card2);
             } catch (err) { loadingState.classList.add('hidden'); showError(err.message); }
         }
 
@@ -356,54 +388,104 @@
         function tempUnitSuffix() { return unitSystem === 'metric' ? '°C' : '°F'; }
 
         // --- Inline SVG line chart (no external chart library) ---
-        function buildTempChartSVG(hourly, gradientId) {
-            const W = 320, H = 150;
-            const pad = { top: 30, right: 16, bottom: 24, left: 16 };
+        // Drawn at the measured pixel size of .chart-host, so it fills the same box on the
+        // short desktop card and on the tall single-column mobile card.
+        function buildTempChartSVG(hourly, gradientId, width, height) {
             const values = hourly.map(p => displayTemp(p.tempC));
-
             if (values.length < 2) {
-                return `<div class="text-white/80 text-xs font-medium flex items-center justify-center h-32">Trend data unavailable</div>`;
+                return `<span class="text-white/80 text-xs font-medium">Trend data unavailable</span>`;
             }
+
+            const W = Math.max(120, Math.round(width));
+            const H = Math.max(120, Math.round(height));
+            const tight = W < 280;
+            const valueFont = tight ? 9 : 11;
+            const xFont = tight ? 8 : 10;
+
+            const pad = { top: tight ? 26 : 34, right: tight ? 14 : 24, bottom: tight ? 20 : 26, left: tight ? 14 : 24 };
+
+            // Rough advance-width estimate (digits ~0.55em, caps ~0.65em, '°' ~0.45em)
+            const estWidth = (text, font) => text.length * font * 0.6;
+
+            const innerW = W - pad.left - pad.right;
+            const stepX = innerW / (hourly.length - 1);
+
+            // Fit plan: how many labels fit per row, and how many alternating rows are needed.
+            // Prefers keeping EVERY point labelled; staggering rows before dropping labels.
+            function fitPlan(maxLabelW, step, gap) {
+                if (maxLabelW + gap <= step) return { every: 1, bands: 1 };
+                if (maxLabelW + gap <= step * 2) return { every: 1, bands: 2 };
+                if (maxLabelW + gap <= step * 4) return { every: 2, bands: 2 };
+                return { every: 3, bands: 2 };
+            }
+
+            const valueTexts = values.map(v => `${Math.round(v)}°`);
+            const valuePlan = fitPlan(Math.max(...valueTexts.map(t => estWidth(t, valueFont))), stepX, 4);
+            const xPlan = fitPlan(Math.max(...hourly.map(p => estWidth(p.label, xFont))), stepX, 4);
+            if (xPlan.bands > 1) pad.bottom += xFont + 5;
+
+            const availH = H - pad.top - pad.bottom;
+            // Use the full leftover height (that is the fix), but keep the plot from turning
+            // into a vertical smear on very tall/narrow cards; leftovers become even padding.
+            const plotH = Math.max(60, Math.min(availH, Math.max(W * 1.6, 170)));
+            const topY = pad.top + Math.max(0, (availH - plotH) / 2);
+            const baseY = topY + plotH;
 
             let min = Math.min(...values);
             let max = Math.max(...values);
             if (max - min < 5) { const mid = (max + min) / 2; min = mid - 2.5; max = mid + 2.5; }
             const span = (max - min) || 1;
 
-            const innerW = W - pad.left - pad.right;
-            const innerH = H - pad.top - pad.bottom;
-            const stepX = innerW / (hourly.length - 1);
             const points = values.map((value, i) => ({
                 x: pad.left + (i * stepX),
-                y: pad.top + (1 - (value - min) / span) * innerH,
-                value,
-                label: hourly[i].label
+                y: topY + (1 - (value - min) / span) * plotH
             }));
 
-            const baseY = pad.top + innerH;
             const coords = points.map(p => `${p.x.toFixed(1)} ${p.y.toFixed(1)}`);
             const linePath = `M ${coords.join(' L ')}`;
-            const areaPath = `M ${points[0].x.toFixed(1)} ${baseY} L ${coords.join(' L ')} L ${points[points.length - 1].x.toFixed(1)} ${baseY} Z`;
+            const areaPath = `M ${points[0].x.toFixed(1)} ${baseY.toFixed(1)} L ${coords.join(' L ')} L ${points[points.length - 1].x.toFixed(1)} ${baseY.toFixed(1)} Z`;
 
-            const grid = [0, 0.5, 1].map(ratio => {
-                const y = (pad.top + (ratio * innerH)).toFixed(1);
+            const grid = [0, 0.25, 0.5, 0.75, 1].map(ratio => {
+                const y = (topY + (ratio * plotH)).toFixed(1);
                 return `<line x1="${pad.left}" y1="${y}" x2="${W - pad.right}" y2="${y}" stroke="rgba(255,255,255,0.18)" stroke-width="1" stroke-dasharray="3 4" />`;
             }).join('');
 
+            const labelStyle = 'paint-order:stroke;stroke-linejoin:round;';
+            const clampX = (x, textW, font) => Math.min(
+                Math.max(x, (textW / 2) + 2),
+                W - (textW / 2) - 2
+            );
+
             const dots = points.map((p, i) => {
-                const r = i === 0 ? 4 : 3;
+                const r = i === 0 ? (tight ? 3.5 : 4.5) : (tight ? 2.5 : 3);
                 const fill = i === 0 ? '#ffffff' : 'rgba(255,255,255,0.85)';
-                const temp = `${Math.round(p.value)}°`;
-                return `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${r}" fill="${fill}" stroke="rgba(15,23,42,0.35)" stroke-width="1" />
-                        <text x="${p.x.toFixed(1)}" y="${(p.y - 9).toFixed(1)}" text-anchor="middle" font-size="10" font-weight="700" fill="#ffffff" style="paint-order:stroke;stroke:rgba(15,23,42,0.55);stroke-width:2.5px;stroke-linejoin:round;">${temp}</text>`;
+                const shown = i % valuePlan.every === 0 || i === points.length - 1;
+                let label = '';
+                if (shown) {
+                    const text = valueTexts[i];
+                    const w = estWidth(text, valueFont);
+                    const row = Math.floor(i / valuePlan.every) % valuePlan.bands;
+                    // Alternate row sits below the point, unless the point is already low
+                    const below = row === 1 && (p.y + valueFont + 8) < baseY;
+                    const y = below ? p.y + valueFont + 7 : p.y - 9;
+                    label = `<text x="${clampX(p.x, w, valueFont).toFixed(1)}" y="${y.toFixed(1)}" text-anchor="middle" font-size="${valueFont}" font-weight="700" fill="#ffffff" style="${labelStyle}stroke:rgba(15,23,42,0.6);stroke-width:2.5px;">${text}</text>`;
+                }
+                return `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${r}" fill="${fill}" stroke="rgba(15,23,42,0.35)" stroke-width="1" />${label}`;
             }).join('');
 
-            const xLabels = points.map(p =>
-                `<text x="${p.x.toFixed(1)}" y="${H - 6}" text-anchor="middle" font-size="9" font-weight="600" fill="rgba(255,255,255,0.85)" style="paint-order:stroke;stroke:rgba(15,23,42,0.45);stroke-width:2.5px;stroke-linejoin:round;">${p.label}</text>`
-            ).join('');
+            const row0Y = H - 6;
+            const row1Y = H - 6 - (xFont + 5);
+            const xLabels = points.map((p, i) => {
+                if (!(i % xPlan.every === 0 || i === points.length - 1)) return '';
+                const text = hourly[i].label;
+                const w = estWidth(text, xFont);
+                const row = Math.floor(i / xPlan.every) % xPlan.bands;
+                const y = row === 1 ? row1Y : row0Y;
+                return `<text x="${clampX(p.x, w, xFont).toFixed(1)}" y="${y.toFixed(1)}" text-anchor="middle" font-size="${xFont}" font-weight="600" fill="rgba(255,255,255,0.85)" style="${labelStyle}stroke:rgba(15,23,42,0.45);stroke-width:2.5px;">${text}</text>`;
+            }).join('');
 
             return `
-            <svg viewBox="0 0 ${W} ${H}" class="w-full h-auto" role="img" aria-label="Line graph of temperature for the next six hours">
+            <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="none" role="img" aria-label="Line graph of temperature for the next six hours">
                 <defs>
                     <linearGradient id="${gradientId}" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="0%" stop-color="#ffffff" stop-opacity="0.45" />
@@ -412,10 +494,65 @@
                 </defs>
                 ${grid}
                 <path d="${areaPath}" fill="url(#${gradientId})" />
-                <path d="${linePath}" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+                <path d="${linePath}" fill="none" stroke="#ffffff" stroke-width="${tight ? 2 : 2.5}" stroke-linecap="round" stroke-linejoin="round" />
                 ${dots}
                 ${xLabels}
             </svg>`;
+        }
+
+        // --- Chart mounting / responsive redraw ---
+        const chartState = new WeakMap();
+
+        function mountChart(element, hourly) {
+            const host = element.querySelector('.chart-host');
+            if (!host) return;
+
+            const previous = chartState.get(element);
+            if (previous && previous.observer) previous.observer.disconnect();
+
+            const state = { hourly, observer: null, lastW: 0, lastH: 0, frame: null };
+            chartState.set(element, state);
+
+            state.draw = () => {
+                const rect = host.getBoundingClientRect();
+                if (rect.width < 60 || rect.height < 60) return; // container hidden / not laid out yet
+                const w = Math.round(rect.width);
+                const h = Math.round(rect.height);
+                if (Math.abs(w - state.lastW) < 3 && Math.abs(h - state.lastH) < 3) return;
+                state.lastW = w; state.lastH = h;
+                host.innerHTML = buildTempChartSVG(state.hourly, `chart-grad-${element.id}`, w, h);
+            };
+
+            state.schedule = () => {
+                if (state.frame) return;
+                state.frame = requestAnimationFrame(() => { state.frame = null; state.draw(); });
+            };
+
+            if ('ResizeObserver' in window) {
+                state.observer = new ResizeObserver(state.schedule);
+                state.observer.observe(host);
+            } else {
+                const onResize = () => state.schedule();
+                window.addEventListener('resize', onResize);
+                window.addEventListener('orientationchange', onResize);
+                state.observer = {
+                    disconnect: () => {
+                        window.removeEventListener('resize', onResize);
+                        window.removeEventListener('orientationchange', onResize);
+                    }
+                };
+            }
+
+            state.draw();
+            state.schedule();
+        }
+
+        function refreshChart(element) {
+            const state = chartState.get(element);
+            if (!state) return;
+            state.lastW = 0; state.lastH = 0; // card size can change on flip / after icons settle
+            state.draw();
+            state.schedule();
         }
 
         function getLocalTime(timezoneOffset) {
@@ -471,7 +608,6 @@
 
             // Preserve flip state across re-renders (unit toggle, re-compare)
             const wasFlipped = element.dataset.flipped === 'true';
-            const chart = buildTempChartSVG(hourly, `chart-grad-${element.id}`);
 
             // Card element = perspective container; the flip transform lives on .card-inner
             element.className = `weather-card rounded-2xl drop-shadow-lg cursor-pointer select-none`;
@@ -483,7 +619,7 @@
             element.innerHTML = `
             <div class="card-inner${wasFlipped ? ' flipped' : ''}">
                 <div class="card-face ${bgClass} shadow-lg">
-                    <div class="p-3 md:p-6 flex flex-col h-full">
+                    <div class="face-body p-3 md:p-6 flex flex-col">
                         <div class="flex flex-col md:flex-row md:justify-between md:items-start mb-4 md:mb-6">
                             <div class="overflow-hidden">
                                 <h2 class="text-lg md:text-2xl font-bold ${textContrast.mainText} truncate" title="${data.name}">${data.name}</h2>
@@ -522,7 +658,7 @@
                         </div>
 
                         <!-- Flip hint -->
-                        <div class="mt-3 md:mt-4 pt-3 border-t border-white/20 flex items-center justify-center gap-1 text-[10px] md:text-xs font-bold uppercase tracking-wide ${textContrast.subText}">
+                        <div class="mt-auto pt-3 md:pt-4 md:mt-4 border-t border-white/20 flex items-center justify-center gap-1 text-[10px] md:text-xs font-bold uppercase tracking-wide ${textContrast.subText}">
                             <i data-lucide="trending-up" class="w-3 h-3 md:w-4 md:h-4"></i>
                             <span>Tap for 6-hour trend</span>
                         </div>
@@ -531,25 +667,28 @@
 
                 <div class="card-face card-back ${bgClass} shadow-lg">
                     <div class="absolute inset-0 bg-slate-950/55"></div>
-                    <div class="relative z-10 p-3 md:p-5 flex flex-col h-full">
-                        <div class="flex items-start justify-between gap-2">
-                            <div class="min-w-0">
-                                <h3 class="text-sm md:text-lg font-bold text-white ${textShadow} truncate">${data.name}</h3>
-                                <p class="text-[10px] md:text-xs font-bold uppercase tracking-wide text-blue-100 ${textShadow}">Next 6 hours · ${tempUnitSuffix()}</p>
-                            </div>
-                            <i data-lucide="line-chart" class="w-4 h-4 md:w-5 md:h-5 text-white/90 shrink-0 ${textShadow}"></i>
+
+                    <div class="trend-header flex items-start justify-between gap-2">
+                        <div class="min-w-0">
+                            <h3 class="text-sm md:text-lg font-bold text-white ${textShadow} truncate">${data.name}</h3>
+                            <p class="text-[10px] md:text-xs font-bold uppercase tracking-wide text-blue-100 ${textShadow}">Next 6 hours · ${tempUnitSuffix()}</p>
                         </div>
-                        <div class="flex-grow flex items-center justify-center mt-1">
-                            ${chart}
-                        </div>
-                        <p class="mt-1 flex items-center justify-center gap-1 text-[9px] md:text-[10px] font-bold uppercase tracking-wide text-blue-100/80">
-                            <i data-lucide="rotate-ccw" class="w-3 h-3"></i>
-                            <span>Tap to flip back</span>
-                        </p>
+                        <i data-lucide="line-chart" class="w-4 h-4 md:w-5 md:h-5 text-white/90 shrink-0 ${textShadow}"></i>
                     </div>
+
+                    <div class="chart-host">
+                        <span class="text-white/70 text-[10px] font-bold uppercase tracking-wide">Loading trend…</span>
+                    </div>
+
+                    <p class="trend-footer flex items-center justify-center gap-1 text-[9px] md:text-[10px] font-bold uppercase tracking-wide text-blue-100/80">
+                        <i data-lucide="rotate-ccw" class="w-3 h-3"></i>
+                        <span>Tap to flip back</span>
+                    </p>
                 </div>
             </div>
         `;
+
+            mountChart(element, hourly);
         }
         function showError(msg) { errorMsg.textContent = msg; errorMsg.classList.remove('hidden'); const form = document.querySelector('.bg-white.rounded-2xl'); form.animate([{ transform: 'translateX(0)' }, { transform: 'translateX(-5px)' }, { transform: 'translateX(5px)' }, { transform: 'translateX(0)' }], { duration: 300 }); }
         function hideError() { errorMsg.classList.add('hidden'); }
