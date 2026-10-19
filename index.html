@@ -379,33 +379,47 @@
         // 3-hourly forecast -> 7 hourly points (Now + next 6 hours) using linear interpolation
         function buildHourlyTemps(current, forecast) {
             const now = Math.floor(Date.now() / 1000);
-            const samples = [{ dt: now, tempC: current.main.temp }];
-            (forecast.list || []).forEach(item => {
-                if (item && item.main && typeof item.main.temp === 'number') samples.push({ dt: item.dt, tempC: item.main.temp });
-            });
-            samples.sort((a, b) => a.dt - b.dt);
 
-            const points = [{ dt: now, tempC: current.main.temp, label: 'Now' }];
+            // Build separate sample arrays for mid, min, max
+            const midSamples  = [{ dt: now, v: current.main.temp }];
+            const minSamples  = [{ dt: now, v: current.main.temp_min ?? current.main.temp }];
+            const maxSamples  = [{ dt: now, v: current.main.temp_max ?? current.main.temp }];
+
+            (forecast.list || []).forEach(item => {
+                if (!item?.main || typeof item.main.temp !== 'number') return;
+                midSamples.push({ dt: item.dt, v: item.main.temp });
+                minSamples.push({ dt: item.dt, v: item.main.temp_min ?? item.main.temp });
+                maxSamples.push({ dt: item.dt, v: item.main.temp_max ?? item.main.temp });
+            });
+
+            const sort = arr => arr.sort((a, b) => a.dt - b.dt);
+            sort(midSamples); sort(minSamples); sort(maxSamples);
+
+            const interp = (samples, t) => {
+                if (!samples.length) return 0;
+                if (t <= samples[0].dt) return samples[0].v;
+                for (let i = 1; i < samples.length; i++) {
+                    const prev = samples[i - 1], next = samples[i];
+                    if (t <= next.dt) {
+                        const gap = (next.dt - prev.dt) || 1;
+                        return prev.v + (t - prev.dt) / gap * (next.v - prev.v);
+                    }
+                }
+                return samples[samples.length - 1].v;
+            };
+
+            const points = [{ dt: now, tempC: current.main.temp, highC: current.main.temp_max ?? current.main.temp, lowC: current.main.temp_min ?? current.main.temp, label: 'Now' }];
             for (let h = 1; h <= 6; h++) {
                 const target = now + (h * 3600);
-                points.push({ dt: target, tempC: interpolateTemp(samples, target), label: formatHourLabel(target, current.timezone) });
+                points.push({
+                    dt: target,
+                    tempC: interp(midSamples, target),
+                    highC: interp(maxSamples, target),
+                    lowC:  interp(minSamples, target),
+                    label: formatHourLabel(target, current.timezone)
+                });
             }
             return points;
-        }
-
-        function interpolateTemp(samples, targetDt) {
-            if (!samples.length) return 0;
-            if (targetDt <= samples[0].dt) return samples[0].tempC;
-            for (let i = 1; i < samples.length; i++) {
-                const prev = samples[i - 1];
-                const next = samples[i];
-                if (targetDt <= next.dt) {
-                    const gap = (next.dt - prev.dt) || 1;
-                    const ratio = (targetDt - prev.dt) / gap;
-                    return prev.tempC + ratio * (next.tempC - prev.tempC);
-                }
-            }
-            return samples[samples.length - 1].tempC;
         }
 
         function formatHourLabel(dt, timezoneOffset) {
@@ -417,59 +431,56 @@
         }
 
         // 3-hourly forecast list -> 4 points: Today + next 3 days
-        // Each point is the average temp and prevailing weather condition for that local calendar day.
+        // Each point carries daily high, low, and prevailing weather condition.
         function buildDailyTemps(current, forecastList) {
             const tz = current.timezone || 0;
-            // Group slots by local calendar date string
             const buckets = {};
+
             forecastList.forEach(item => {
                 if (!item || !item.main || typeof item.main.temp !== 'number') return;
                 const localDate = new Date((item.dt + tz) * 1000);
                 const key = `${localDate.getUTCFullYear()}-${localDate.getUTCMonth()}-${localDate.getUTCDate()}`;
-                if (!buckets[key]) buckets[key] = { temps: [], dt: item.dt, tz, condTally: {} };
-                buckets[key].temps.push(item.main.temp);
-                // Tally weather condition IDs
-                if (item.weather && item.weather[0]) {
+                if (!buckets[key]) buckets[key] = { highs: [], lows: [], dt: item.dt, condTally: {} };
+                // Use temp_min / temp_max if available, otherwise temp itself
+                buckets[key].highs.push(item.main.temp_max ?? item.main.temp);
+                buckets[key].lows.push(item.main.temp_min  ?? item.main.temp);
+                if (item.weather?.[0]) {
                     const id = item.weather[0].id;
                     buckets[key].condTally[id] = (buckets[key].condTally[id] || 0) + 1;
                 }
             });
 
-            // Also bucket today's current temp + condition
+            // Seed today's bucket with current observation
             const nowDt = Math.floor(Date.now() / 1000);
             const todayLocal = new Date((nowDt + tz) * 1000);
             const todayKey = `${todayLocal.getUTCFullYear()}-${todayLocal.getUTCMonth()}-${todayLocal.getUTCDate()}`;
-            if (!buckets[todayKey]) buckets[todayKey] = { temps: [], dt: nowDt, tz, condTally: {} };
-            buckets[todayKey].temps.unshift(current.main.temp);
-            if (current.weather && current.weather[0]) {
+            if (!buckets[todayKey]) buckets[todayKey] = { highs: [], lows: [], dt: nowDt, condTally: {} };
+            buckets[todayKey].highs.push(current.main.temp_max ?? current.main.temp);
+            buckets[todayKey].lows.push(current.main.temp_min  ?? current.main.temp);
+            if (current.weather?.[0]) {
                 const id = current.weather[0].id;
                 buckets[todayKey].condTally[id] = (buckets[todayKey].condTally[id] || 0) + 1;
             }
 
-            // Sort keys by date and take up to 4 days
             const sortedKeys = Object.keys(buckets).sort();
             const days = sortedKeys.slice(0, 4);
 
             if (days.length < 2) {
-                return [{ dt: nowDt, tempC: current.main.temp, label: 'Today', condId: current.weather?.[0]?.id ?? null }];
+                const t = current.main.temp;
+                return [{ dt: nowDt, tempC: t, highC: current.main.temp_max ?? t, lowC: current.main.temp_min ?? t, label: 'Today', condId: current.weather?.[0]?.id ?? null }];
             }
 
             return days.map((key, idx) => {
-                const bucket = buckets[key];
-                const avg = bucket.temps.reduce((s, v) => s + v, 0) / bucket.temps.length;
-                let label;
-                if (idx === 0) {
-                    label = 'Today';
-                } else {
-                    const d = new Date((bucket.dt + tz) * 1000);
-                    label = d.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' });
-                }
-                // Pick the most-voted condition id
-                const tally = bucket.condTally;
+                const b = buckets[key];
+                const highC = Math.max(...b.highs);
+                const lowC  = Math.min(...b.lows);
+                const tempC = (highC + lowC) / 2;
+                const label = idx === 0 ? 'Today' : new Date((b.dt + tz) * 1000).toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' });
+                const tally = b.condTally;
                 const condId = Object.keys(tally).length
-                    ? Number(Object.keys(tally).reduce((a, b) => tally[a] > tally[b] ? a : b))
+                    ? Number(Object.keys(tally).reduce((a, c) => tally[a] > tally[c] ? a : c))
                     : null;
-                return { dt: bucket.dt, tempC: avg, label, condId };
+                return { dt: b.dt, tempC, highC, lowC, label, condId };
             });
         }
 
@@ -494,127 +505,134 @@
         }
 
         // --- Inline SVG line chart (no external chart library) ---
-        // Drawn at the measured pixel size of .chart-host, so it fills the same box on the
-        // short desktop card and on the tall single-column mobile card.
-        function buildTempChartSVG(hourly, gradientId, width, height) {
-            const values = hourly.map(p => displayTemp(p.tempC));
-            if (values.length < 2) {
+        // Dual high/low lines with a shaded band between them.
+        function buildTempChartSVG(points, gradientId, width, height) {
+            if (points.length < 2) {
                 return `<span class="text-white/80 text-xs font-medium">Trend data unavailable</span>`;
             }
 
-            const hasCondIcons = hourly.some(p => p.condId != null);
+            const hasCondIcons = points.some(p => p.condId != null);
+            const highVals = points.map(p => displayTemp(p.highC));
+            const lowVals  = points.map(p => displayTemp(p.lowC));
 
             const W = Math.max(120, Math.round(width));
             const H = Math.max(120, Math.round(height));
             const tight = W < 280;
-            const valueFont = tight ? 9 : 11;
-            const xFont = tight ? 8 : 10;
-            const iconFont = tight ? 11 : 13; // emoji size
+            const valFont = tight ? 9 : 10;
+            const xFont   = tight ? 8 : 10;
+            const iconFont = tight ? 11 : 13;
 
-            const pad = { top: tight ? 26 : 34, right: tight ? 14 : 24, bottom: tight ? 20 : 26, left: tight ? 14 : 24 };
-            if (hasCondIcons) pad.bottom += iconFont + 3; // room for emoji row
+            const pad = { top: tight ? 28 : 36, right: tight ? 16 : 26, bottom: tight ? 22 : 28, left: tight ? 16 : 26 };
+            if (hasCondIcons) pad.bottom += iconFont + 3;
 
-            // Rough advance-width estimate (digits ~0.55em, caps ~0.65em, '°' ~0.45em)
             const estWidth = (text, font) => text.length * font * 0.6;
 
             const innerW = W - pad.left - pad.right;
-            const stepX = innerW / (hourly.length - 1);
+            const stepX  = innerW / (points.length - 1);
 
-            // Fit plan: how many labels fit per row, and how many alternating rows are needed.
+            // Fit plan for x-axis labels
             function fitPlan(maxLabelW, step, gap) {
                 if (maxLabelW + gap <= step) return { every: 1, bands: 1 };
                 if (maxLabelW + gap <= step * 2) return { every: 1, bands: 2 };
                 if (maxLabelW + gap <= step * 4) return { every: 2, bands: 2 };
                 return { every: 3, bands: 2 };
             }
-
-            const valueTexts = values.map(v => `${Math.round(v)}°`);
-            const valuePlan = fitPlan(Math.max(...valueTexts.map(t => estWidth(t, valueFont))), stepX, 4);
-            const xPlan = fitPlan(Math.max(...hourly.map(p => estWidth(p.label, xFont))), stepX, 4);
+            const xPlan = fitPlan(Math.max(...points.map(p => estWidth(p.label, xFont))), stepX, 4);
             if (xPlan.bands > 1) pad.bottom += xFont + 5;
 
             const availH = H - pad.top - pad.bottom;
-            const plotH = Math.max(60, Math.min(availH, Math.max(W * 1.6, 170)));
-            const topY = pad.top + Math.max(0, (availH - plotH) / 2);
-            const baseY = topY + plotH;
+            const plotH  = Math.max(60, Math.min(availH, Math.max(W * 1.6, 170)));
+            const topY   = pad.top + Math.max(0, (availH - plotH) / 2);
+            const baseY  = topY + plotH;
 
-            let min = Math.min(...values);
-            let max = Math.max(...values);
-            if (max - min < 5) { const mid = (max + min) / 2; min = mid - 2.5; max = mid + 2.5; }
-            const span = (max - min) || 1;
+            // Scale from a unified range covering both highs and lows
+            let minV = Math.min(...lowVals);
+            let maxV = Math.max(...highVals);
+            if (maxV - minV < 5) { const mid = (maxV + minV) / 2; minV = mid - 2.5; maxV = mid + 2.5; }
+            const span = (maxV - minV) || 1;
+            const toY  = v => topY + (1 - (v - minV) / span) * plotH;
 
-            const points = values.map((value, i) => ({
-                x: pad.left + (i * stepX),
-                y: topY + (1 - (value - min) / span) * plotH
-            }));
+            const hPts = highVals.map((v, i) => ({ x: pad.left + i * stepX, y: toY(v) }));
+            const lPts = lowVals.map( (v, i) => ({ x: pad.left + i * stepX, y: toY(v) }));
 
-            const coords = points.map(p => `${p.x.toFixed(1)} ${p.y.toFixed(1)}`);
-            const linePath = `M ${coords.join(' L ')}`;
-            const areaPath = `M ${points[0].x.toFixed(1)} ${baseY.toFixed(1)} L ${coords.join(' L ')} L ${points[points.length - 1].x.toFixed(1)} ${baseY.toFixed(1)} Z`;
+            const pathD = pts => `M ${pts.map(p => `${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' L ')}`;
 
-            const grid = [0, 0.25, 0.5, 0.75, 1].map(ratio => {
-                const y = (topY + (ratio * plotH)).toFixed(1);
-                return `<line x1="${pad.left}" y1="${y}" x2="${W - pad.right}" y2="${y}" stroke="rgba(255,255,255,0.18)" stroke-width="1" stroke-dasharray="3 4" />`;
+            // Band fill: high line forward + low line backward
+            const bandPath = `${pathD(hPts)} L ${[...lPts].reverse().map(p => `${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' L ')} Z`;
+
+            // Grid lines
+            const grid = [0, 0.25, 0.5, 0.75, 1].map(r => {
+                const y = (topY + r * plotH).toFixed(1);
+                return `<line x1="${pad.left}" y1="${y}" x2="${W - pad.right}" y2="${y}" stroke="rgba(255,255,255,0.15)" stroke-width="1" stroke-dasharray="3 4"/>`;
             }).join('');
-
-            // Text rendering helpers — thick dark stroke behind white fill gives a crisp halo.
-            // paint-order:stroke ensures the stroke is drawn first so the fill sits clean on top.
-            const textHaloStyle = 'paint-order:stroke;stroke-linejoin:round;';
-            const clampX = (x, textW) => Math.min(Math.max(x, (textW / 2) + 2), W - (textW / 2) - 2);
-
-            // Value labels (temperature above/below each dot)
-            const dots = points.map((p, i) => {
-                const r = i === 0 ? (tight ? 3.5 : 4.5) : (tight ? 2.5 : 3);
-                const fill = i === 0 ? '#ffffff' : 'rgba(255,255,255,0.85)';
-                const shown = i % valuePlan.every === 0 || i === points.length - 1;
-                let label = '';
-                if (shown) {
-                    const text = valueTexts[i];
-                    const w = estWidth(text, valueFont);
-                    const row = Math.floor(i / valuePlan.every) % valuePlan.bands;
-                    const below = row === 1 && (p.y + valueFont + 8) < baseY;
-                    const y = below ? p.y + valueFont + 7 : p.y - 9;
-                    label = `<text x="${clampX(p.x, w).toFixed(1)}" y="${y.toFixed(1)}" text-anchor="middle" font-size="${valueFont}" font-weight="700" fill="#ffffff" style="${textHaloStyle}stroke:rgba(10,15,30,0.92);stroke-width:4px;" filter="url(#${gradientId}-ts)">${text}</text>`;
-                }
-                return `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${r}" fill="${fill}" stroke="rgba(15,23,42,0.45)" stroke-width="1.5" />${label}`;
-            }).join('');
-
-            // X-axis day/hour labels
-            const row0Y = H - (hasCondIcons ? iconFont + 5 : 6);
-            const row1Y = row0Y - (xFont + 5);
-            const xLabels = points.map((p, i) => {
-                if (!(i % xPlan.every === 0 || i === points.length - 1)) return '';
-                const text = hourly[i].label;
-                const w = estWidth(text, xFont);
-                const row = Math.floor(i / xPlan.every) % xPlan.bands;
-                const y = row === 1 ? row1Y : row0Y;
-                return `<text x="${clampX(p.x, w).toFixed(1)}" y="${y.toFixed(1)}" text-anchor="middle" font-size="${xFont}" font-weight="600" fill="rgba(255,255,255,0.92)" style="${textHaloStyle}stroke:rgba(10,15,30,0.85);stroke-width:3.5px;" filter="url(#${gradientId}-ts)">${text}</text>`;
-            }).join('');
-
-            // Weather condition emoji icons below x-axis labels (daily mode only)
-            const iconY = H - 2;
-            const condIcons = hasCondIcons ? points.map((p, i) => {
-                const emoji = condIdToEmoji(hourly[i].condId);
-                if (!emoji) return '';
-                return `<text x="${p.x.toFixed(1)}" y="${iconY}" text-anchor="middle" font-size="${iconFont}" dominant-baseline="auto">${emoji}</text>`;
-            }).join('') : '';
 
             const filterId = `${gradientId}-ts`;
+            const haloStyle = 'paint-order:stroke;stroke-linejoin:round;';
+            const clampX = (x, tw) => Math.min(Math.max(x, tw / 2 + 2), W - tw / 2 - 2);
+            const makeLabel = (text, x, y) => {
+                const tw = estWidth(text, valFont);
+                return `<text x="${clampX(x, tw).toFixed(1)}" y="${y.toFixed(1)}" text-anchor="middle" font-size="${valFont}" font-weight="700" fill="#ffffff" style="${haloStyle}stroke:rgba(10,15,30,0.92);stroke-width:4px;" filter="url(#${filterId})">${text}</text>`;
+            };
+
+            // Dots + H/L value labels
+            let dotsHtml = '';
+            points.forEach((pt, i) => {
+                const hx = hPts[i].x, hy = hPts[i].y;
+                const lx = lPts[i].x, ly = lPts[i].y;
+                const rH = tight ? 2.5 : 3, rL = tight ? 2.5 : 3;
+
+                // High dot (amber)
+                dotsHtml += `<circle cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="${rH}" fill="#fcd34d" stroke="rgba(10,15,30,0.5)" stroke-width="1.5"/>`;
+                // Low dot (sky)
+                dotsHtml += `<circle cx="${lx.toFixed(1)}" cy="${ly.toFixed(1)}" r="${rL}" fill="#7dd3fc" stroke="rgba(10,15,30,0.5)" stroke-width="1.5"/>`;
+
+                // Labels: show every point for daily (few points), otherwise every-other for hourly
+                const showEvery = points.length <= 4 ? 1 : 2;
+                if (i % showEvery === 0 || i === points.length - 1) {
+                    const hText = `H:${Math.round(highVals[i])}°`;
+                    const lText = `L:${Math.round(lowVals[i])}°`;
+                    // High label above high dot; low label below low dot
+                    const labelGap = valFont + 5;
+                    dotsHtml += makeLabel(hText, hx, hy - 7);
+                    dotsHtml += makeLabel(lText, lx, ly + labelGap);
+                }
+            });
+
+            // X-axis labels
+            const row0Y = H - (hasCondIcons ? iconFont + 5 : 6);
+            const row1Y = row0Y - (xFont + 5);
+            const xLabels = hPts.map((p, i) => {
+                if (!(i % xPlan.every === 0 || i === hPts.length - 1)) return '';
+                const text = points[i].label;
+                const tw = estWidth(text, xFont);
+                const row = Math.floor(i / xPlan.every) % xPlan.bands;
+                const y = row === 1 ? row1Y : row0Y;
+                return `<text x="${clampX(p.x, tw).toFixed(1)}" y="${y.toFixed(1)}" text-anchor="middle" font-size="${xFont}" font-weight="600" fill="rgba(255,255,255,0.92)" style="${haloStyle}stroke:rgba(10,15,30,0.85);stroke-width:3.5px;" filter="url(#${filterId})">${text}</text>`;
+            }).join('');
+
+            // Condition emoji icons (daily mode)
+            const iconY = H - 2;
+            const condIcons = hasCondIcons ? hPts.map((p, i) => {
+                const emoji = condIdToEmoji(points[i].condId);
+                return emoji ? `<text x="${p.x.toFixed(1)}" y="${iconY}" text-anchor="middle" font-size="${iconFont}" dominant-baseline="auto">${emoji}</text>` : '';
+            }).join('') : '';
+
             return `
-            <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="none" role="img" aria-label="Line graph of temperature trend">
+            <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="none" role="img" aria-label="High/low temperature trend">
                 <defs>
-                    <linearGradient id="${gradientId}" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stop-color="#ffffff" stop-opacity="0.45" />
-                        <stop offset="100%" stop-color="#ffffff" stop-opacity="0" />
+                    <linearGradient id="${gradientId}-band" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stop-color="#fcd34d" stop-opacity="0.25"/>
+                        <stop offset="100%" stop-color="#7dd3fc" stop-opacity="0.25"/>
                     </linearGradient>
                     <filter id="${filterId}" x="-30%" y="-60%" width="160%" height="220%">
-                        <feDropShadow dx="0" dy="0" stdDeviation="1.5" flood-color="rgba(5,10,20,0.95)" flood-opacity="1" />
+                        <feDropShadow dx="0" dy="0" stdDeviation="1.5" flood-color="rgba(5,10,20,0.95)" flood-opacity="1"/>
                     </filter>
                 </defs>
                 ${grid}
-                <path d="${areaPath}" fill="url(#${gradientId})" />
-                <path d="${linePath}" fill="none" stroke="#ffffff" stroke-width="${tight ? 2 : 2.5}" stroke-linecap="round" stroke-linejoin="round" />
-                ${dots}
+                <path d="${bandPath}" fill="url(#${gradientId}-band)"/>
+                <path d="${pathD(hPts)}" fill="none" stroke="#fcd34d" stroke-width="${tight ? 1.8 : 2.2}" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
+                <path d="${pathD(lPts)}" fill="none" stroke="#7dd3fc" stroke-width="${tight ? 1.8 : 2.2}" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
+                ${dotsHtml}
                 ${xLabels}
                 ${condIcons}
             </svg>`;
