@@ -490,17 +490,17 @@
         // Map OWM condition ID ranges to a representative emoji
         function condIdToEmoji(id) {
             if (id == null) return '';
-            if (id >= 200 && id < 300) return '⛈';  // Thunderstorm
-            if (id >= 300 && id < 400) return '🌦';  // Drizzle
-            if (id >= 500 && id < 511) return '🌧';  // Rain
-            if (id === 511)            return '🌨';  // Freezing rain
-            if (id >= 512 && id < 600) return '🌧';  // Shower rain
-            if (id >= 600 && id < 700) return '❄';   // Snow
-            if (id >= 700 && id < 800) return '🌫';  // Atmosphere (fog/haze/dust)
-            if (id === 800)            return '☀';   // Clear
-            if (id === 801)            return '🌤';  // Few clouds
-            if (id === 802)            return '⛅';  // Scattered clouds
-            if (id >= 803)             return '☁';   // Broken/overcast clouds
+            if (id >= 200 && id < 300) return '⛈\uFE0F';  // Thunderstorm
+            if (id >= 300 && id < 400) return '🌦\uFE0F';  // Drizzle
+            if (id >= 500 && id < 511) return '🌧\uFE0F';  // Rain
+            if (id === 511)            return '🌨\uFE0F';  // Freezing rain
+            if (id >= 512 && id < 600) return '🌧\uFE0F';  // Shower rain
+            if (id >= 600 && id < 700) return '❄\uFE0F';   // Snow
+            if (id >= 700 && id < 800) return '🌫\uFE0F';  // Atmosphere (fog/haze/dust)
+            if (id === 800)            return '☀\uFE0F';   // Clear
+            if (id === 801)            return '🌤\uFE0F';  // Few clouds
+            if (id === 802)            return '⛅';         // Scattered clouds
+            if (id >= 803)             return '☁\uFE0F';   // Broken/overcast clouds
             return '';
         }
 
@@ -521,9 +521,10 @@
             const valFont = tight ? 9 : 10;
             const xFont   = tight ? 8 : 10;
             const iconFont = tight ? 11 : 13;
+            const iconSize = iconFont + 3;
 
             const pad = { top: tight ? 28 : 36, right: tight ? 16 : 26, bottom: tight ? 22 : 28, left: tight ? 16 : 26 };
-            if (hasCondIcons) pad.bottom += iconFont + 3;
+            if (hasCondIcons) pad.bottom += iconSize;
 
             const estWidth = (text, font) => text.length * font * 0.6;
 
@@ -599,7 +600,7 @@
             });
 
             // X-axis labels
-            const row0Y = H - (hasCondIcons ? iconFont + 5 : 6);
+            const row0Y = H - (hasCondIcons ? iconSize + 5 : 6);
             const row1Y = row0Y - (xFont + 5);
             const xLabels = hPts.map((p, i) => {
                 if (!(i % xPlan.every === 0 || i === hPts.length - 1)) return '';
@@ -610,11 +611,15 @@
                 return `<text x="${clampX(p.x, tw).toFixed(1)}" y="${y.toFixed(1)}" text-anchor="middle" font-size="${xFont}" font-weight="600" fill="rgba(255,255,255,0.92)" style="${haloStyle}stroke:rgba(10,15,30,0.85);stroke-width:3.5px;" filter="url(#${filterId})">${text}</text>`;
             }).join('');
 
-            // Condition emoji icons (daily mode)
-            const iconY = H - 2;
+            // Condition icons (daily mode) as HTML inside foreignObject
+            const iconY = H - iconSize - 1;
             const condIcons = hasCondIcons ? hPts.map((p, i) => {
                 const emoji = condIdToEmoji(points[i].condId);
-                return emoji ? `<text x="${p.x.toFixed(1)}" y="${iconY}" text-anchor="middle" font-size="${iconFont}" dominant-baseline="auto">${emoji}</text>` : '';
+                if (!emoji) return '';
+                const x = Math.min(Math.max(p.x - iconSize / 2, 1), W - iconSize - 1);
+                return `<foreignObject x="${x.toFixed(1)}" y="${iconY.toFixed(1)}" width="${iconSize}" height="${iconSize}" style="overflow:visible;">
+                        <div xmlns="http://www.w3.org/1999/xhtml" style="width:${iconSize}px;height:${iconSize}px;display:flex;align-items:center;justify-content:center;font-size:${iconFont}px;line-height:1;font-family:'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji','Twemoji Mozilla','EmojiOne Color','Android Emoji',sans-serif;">${emoji}</div>
+                    </foreignObject>`;
             }).join('') : '';
 
             return `
