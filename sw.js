@@ -1,7 +1,7 @@
-// v8: per-asset precache (#1a). The asset set is unchanged from v7, but an install that
-// previously aborted part-way may have left the v7 cache absent or partially populated, so
-// a new cache name guarantees a clean install attempt on the next visit.
-const CACHE_NAME = 'weather-compare-v8';
+// v9: network-first navigations + stale-while-revalidate assets (#2). The strategy changed
+// from cache-first-for-everything, so a new cache name forces a clean repopulate under the
+// new rules instead of inheriting entries fetched under the old ones.
+const CACHE_NAME = 'weather-compare-v9';
 const ASSETS_TO_CACHE = [
   './',
 './index.html',
@@ -11,6 +11,13 @@ const ASSETS_TO_CACHE = [
 'https://unpkg.com/lucide@latest'
 ];
 
+// A response is worth storing if it succeeded. Cross-origin <script> tags are requested in
+// no-cors mode and come back "opaque" with status 0, so response.ok alone would skip the
+// CDN entries entirely.
+function isCacheable(response) {
+  return !!response && (response.ok || response.type === 'opaque');
+}
+
 // Install Event: Cache assets
 //
 // Each asset is added individually instead of via cache.addAll(). addAll() rejects the
@@ -18,6 +25,10 @@ const ASSETS_TO_CACHE = [
 // response as a failure. The unpkg CDN entry answers with a redirect, so addAll() made
 // install fail outright and no offline cache was ever created. Per-asset add with a
 // per-asset catch keeps install alive and caches everything that can be cached.
+//
+// No skipWaiting() here. A new worker waits in the "waiting" state so the page can offer a
+// reload; activating underneath a running page swaps assets mid-session and can serve a
+// half-updated app. The page activates us on demand via the SKIP_WAITING message below.
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
@@ -32,21 +43,63 @@ self.addEventListener('install', (event) => {
       );
     })
   );
-  self.skipWaiting();
 });
 
-// Fetch Event: Serve from cache, fallback to network
-self.addEventListener('fetch', (event) => {
-  event.respondWith(
-    caches.match(event.request).then((response) => {
-      // Return cache hit if found
-      if (response) {
-        return response;
+// Message Event: the page asks the waiting worker to take over.
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
+});
+
+// Network-first: always try the network, fall back to cache when it fails. Used for
+// navigations so a returning visitor gets the current app, not last week's shell.
+async function networkFirst(request) {
+  const cache = await caches.open(CACHE_NAME);
+  try {
+    const response = await fetch(request);
+    if (isCacheable(response)) {
+      cache.put(request, response.clone());
+    }
+    return response;
+  } catch (error) {
+    const cached = await cache.match(request);
+    if (cached) return cached;
+    // A navigation URL may not match the precached shell exactly; fall back to it.
+    const shell = (await cache.match('./index.html')) || (await cache.match('./'));
+    if (shell) return shell;
+    throw error;
+  }
+}
+
+// Stale-while-revalidate: serve the cached copy immediately, refresh it in the background.
+// Used for static assets so repeat visits are fast without pinning them to old bytes.
+async function staleWhileRevalidate(request) {
+  const cache = await caches.open(CACHE_NAME);
+  const cached = await cache.match(request);
+  const network = fetch(request)
+    .then((response) => {
+      if (isCacheable(response)) {
+        cache.put(request, response.clone());
       }
-      // Otherwise fetch from network
-      return fetch(event.request);
+      return response;
     })
-  );
+    .catch(() => null);
+  return cached || (await network) || Response.error();
+}
+
+// Fetch Event: pick a strategy per request.
+self.addEventListener('fetch', (event) => {
+  const request = event.request;
+
+  // Navigations are the app itself: prefer fresh bytes.
+  if (request.mode === 'navigate') {
+    event.respondWith(networkFirst(request));
+    return;
+  }
+
+  // Everything else the app loads (shell files, CDN scripts) is static: prefer fast.
+  event.respondWith(staleWhileRevalidate(request));
 });
 
 // Activate Event: Cleanup old caches
