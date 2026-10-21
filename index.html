@@ -130,6 +130,12 @@
                 <p class="text-sm text-slate-600 mb-4">
                     This tool uses the OpenWeatherMap API. Your key is stored locally in your browser.
                 </p>
+                <div class="mb-4 flex items-start gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg">
+                    <span aria-hidden="true" class="shrink-0 text-amber-600">⚠</span>
+                    <p class="text-xs text-amber-800 leading-snug">
+                        The key is saved in plain text in this browser's local storage, and each request sends it in the URL, so it can appear in server logs and browser history. Use a key you are willing to expose, and remove it when you are done.
+                    </p>
+                </div>
                 <div class="space-y-4">
                     <div>
                         <label class="block text-xs font-semibold text-slate-500 uppercase mb-1">API Key</label>
@@ -401,7 +407,11 @@
         }
 
         async function fetchWeather(city) {
-            const query = `q=${encodeURIComponent(city)}&appid=${apiKey}&units=metric`;
+            // The key is user-supplied and may contain characters that are unsafe in a query
+            // string, so it is encoded like any other untrusted value. This does not hide the
+            // key -- it still travels in the URL and appears in server logs and browser history;
+            // that is what the plaintext-storage warning in the key modal is about.
+            const query = `q=${encodeURIComponent(city)}&appid=${encodeURIComponent(apiKey)}&units=metric`;
             const currentUrl = `https://api.openweathermap.org/data/2.5/weather?${query}`;
             const forecastUrl = `https://api.openweathermap.org/data/2.5/forecast?${query}&cnt=24`;
             let currentRes, forecastRes;
