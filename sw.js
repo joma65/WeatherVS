@@ -145,8 +145,12 @@ self.addEventListener('activate', (event) => {
     caches.keys().then((keyList) => {
       return Promise.all(
         keyList.map((key) => {
-          // Delete old cache versions (v1, v2, v3, etc)
-          if (key !== CACHE_NAME) {
+          // Delete only superseded caches belonging to this app. The prefix check
+          // matters: without it this deletes EVERY cache on the origin, not just old
+          // weather-compare-* ones, and activate runs on every worker update -- so any
+          // other app or future runtime cache sharing this origin would be wiped
+          // repeatedly, and cache deletion is not undoable by the user.
+          if (key !== CACHE_NAME && key.startsWith('weather-compare-')) {
             return caches.delete(key);
           }
         })
