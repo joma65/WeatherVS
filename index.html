@@ -596,7 +596,11 @@
                 const highC = Math.max(...b.highs);
                 const lowC  = Math.min(...b.lows);
                 const tempC = (highC + lowC) / 2;
-                const label = idx === 0 ? 'Today' : new Date((b.dt + tz) * 1000).toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' });
+                // The forecast request uses cnt=24, which covers now-onward only. Today's bucket
+                // therefore holds the REST of today, not the whole day: an earlier high that has
+                // already passed is not in the data. Labelling it "Today" claimed a full-day
+                // envelope the numbers do not support, so it says what it actually is.
+                const label = idx === 0 ? 'Rest of today' : new Date((b.dt + tz) * 1000).toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' });
                 const tally = b.condTally;
                 const condId = Object.keys(tally).length
                     ? Number(Object.keys(tally).reduce((a, c) => tally[a] > tally[c] ? a : c))
