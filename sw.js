@@ -1,12 +1,20 @@
-// v11: icon-192.png added to the precache (#10a). The manifest now ships a real 192px icon
-// alongside the 512px one, so the shell asset set grew again and the cache name moves with
-// it.
+// v12: lucide pinned to an exact version AND a full file path (#1b). The precached URL
+// changed, so the cache name moves with it -- a worker installing into the existing name
+// would treat the old lucide entry as present and skip fetching the new one.
 //
-// Earlier versions: v10 added icon.png to the precache (#38); v9 split network-first
-// navigations from stale-while-revalidate assets (#2); v8 replaced cache.addAll() with
-// per-asset add (#1a). v7 and older served everything cache-first and aborted install on any
-// failed asset.
-const CACHE_NAME = 'weather-compare-v11';
+// Why a deep path and not just a pinned version: unpkg answers a bare package URL with a
+// redirect, and the Cache API treats a redirected response as a failed request.
+//   https://unpkg.com/lucide@latest                        -> 302
+//   https://unpkg.com/lucide@1.61.0                        -> 301 (still redirects)
+//   https://unpkg.com/lucide@1.61.0/dist/umd/lucide.min.js -> 200 (clean)
+// Pinning the version alone would leave the precache still failing, while looking fixed.
+// Do not "tidy" this back to a short URL.
+//
+// Earlier versions: v11 added icon-192.png (#10a); v10 added icon.png (#38); v9 split
+// network-first navigations from stale-while-revalidate assets (#2); v8 replaced
+// cache.addAll() with per-asset add (#1a). v7 and older served everything cache-first and
+// aborted install on any failed asset.
+const CACHE_NAME = 'weather-compare-v12';
 const ASSETS_TO_CACHE = [
   './',
 './index.html',
@@ -14,7 +22,7 @@ const ASSETS_TO_CACHE = [
 './icon.png',
 './icon-192.png',
 'https://cdn.tailwindcss.com',
-'https://unpkg.com/lucide@latest'
+'https://unpkg.com/lucide@1.61.0/dist/umd/lucide.min.js'
 ];
 
 // Cache matching for static assets. A query string on a static asset does not change which
