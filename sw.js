@@ -1,16 +1,18 @@
-// v10: icon.png added to the precache (#38). The asset set grew, so the cache name moves
-// with it -- a worker installing into an existing name would skip assets it thinks it
-// already has.
+// v11: icon-192.png added to the precache (#10a). The manifest now ships a real 192px icon
+// alongside the 512px one, so the shell asset set grew again and the cache name moves with
+// it.
 //
-// Earlier versions: v9 split network-first navigations from stale-while-revalidate assets
-// (#2); v8 replaced cache.addAll() with per-asset add (#1a). v7 and older served everything
-// cache-first and aborted install on any failed asset.
-const CACHE_NAME = 'weather-compare-v10';
+// Earlier versions: v10 added icon.png to the precache (#38); v9 split network-first
+// navigations from stale-while-revalidate assets (#2); v8 replaced cache.addAll() with
+// per-asset add (#1a). v7 and older served everything cache-first and aborted install on any
+// failed asset.
+const CACHE_NAME = 'weather-compare-v11';
 const ASSETS_TO_CACHE = [
   './',
 './index.html',
 './manifest.json',
 './icon.png',
+'./icon-192.png',
 'https://cdn.tailwindcss.com',
 'https://unpkg.com/lucide@latest'
 ];
