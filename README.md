@@ -11,9 +11,9 @@ static files served as-is.
 
 | File | Purpose |
 |---|---|
-| `index.html` | The entire application — markup, styles (Tailwind via CDN), and all JavaScript. Single file, ~850 lines. |
+| `index.html` | The entire application — markup, styles (Tailwind via CDN), and all JavaScript. Single file. |
 | `manifest.json` | PWA manifest: app name, `start_url`, standalone display, theme/background colors, icon entries. |
-| `sw.js` | Service worker: pre-caches the app shell and CDN assets, serves cache-first with network fallback, and clears old cache versions on activate. Cache name is versioned (`weather-compare-v7`). |
+| `sw.js` | Service worker: pre-caches the app shell and CDN assets, serves navigations network-first and static assets stale-while-revalidate, and clears old cache versions on activate. Cache name is versioned (`weather-compare-v10`). |
 | `icon.png` | App icon, referenced by `manifest.json`. |
 
 No `package.json` — nothing to install.
@@ -34,8 +34,13 @@ python3 -m http.server 8080
 Then open <http://localhost:8080>. Equivalents: `npx serve .`, `php -S localhost:8080`,
 or any static host.
 
-> If you change `sw.js`, bump `CACHE_NAME` (e.g. `v7` → `v8`), otherwise returning visitors
-> keep being served the previously cached shell.
+> If you change `sw.js`, bump `CACHE_NAME` (e.g. `v10` → `v11`), otherwise returning visitors
+> keep being served the previously cached shell. The current version is `weather-compare-v10`.
+
+The worker does not activate itself on update. When a new version is waiting, the page is
+expected to offer a reload and post `{ type: 'SKIP_WAITING' }` to the waiting worker; the
+worker then calls `skipWaiting()` and the page reloads on `controllerchange`. Without that
+page-side wiring, a new worker will sit in the waiting state until every tab is closed.
 
 ## Getting an OpenWeatherMap API key
 
@@ -73,12 +78,17 @@ that holds the key server-side.
 See the project backlog for tracked work (README does not enumerate it). Current known
 rough edges, as found:
 
-- Service worker is cache-first for everything it caches, so app updates are only picked up
-  after a `CACHE_NAME` bump or a cache clear.
-- No offline fallback page: if the shell is not in cache and the network is down, the fetch
-  fails rather than degrading to a cached view.
+- No offline fallback page: a navigation that fails with nothing cached re-throws rather
+  than showing a friendly offline view. The shell itself is cached, so a repeat visitor
+  usually gets the app, but a first visit with no network does not.
 - Third-party assets (Tailwind CDN, Lucide, weather icons) are loaded from external CDNs at
   runtime; the app is not fully self-contained offline.
+- The `icon.png` artwork does not respect the maskable safe zone (content reaches the canvas
+  edge), so `manifest.json` declares it `purpose: "any"` only. A padded maskable variant is
+  outstanding.
+- The Lucide script is requested at `@latest` in both `index.html` and `sw.js`, so the
+  precached copy can drift from the one the page asks for. Pinning the version needs a
+  change to both files at once.
 - API key handling is client-side and plaintext (see above).
 
 ## License
