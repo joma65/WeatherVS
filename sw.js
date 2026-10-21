@@ -1,5 +1,7 @@
-// Updated version to force cache refresh for new UI
-const CACHE_NAME = 'weather-compare-v7';
+// v8: per-asset precache (#1a). The asset set is unchanged from v7, but an install that
+// previously aborted part-way may have left the v7 cache absent or partially populated, so
+// a new cache name guarantees a clean install attempt on the next visit.
+const CACHE_NAME = 'weather-compare-v8';
 const ASSETS_TO_CACHE = [
   './',
 './index.html',
@@ -10,11 +12,24 @@ const ASSETS_TO_CACHE = [
 ];
 
 // Install Event: Cache assets
+//
+// Each asset is added individually instead of via cache.addAll(). addAll() rejects the
+// whole install if any single request fails, and the Cache API treats a redirected (302)
+// response as a failure. The unpkg CDN entry answers with a redirect, so addAll() made
+// install fail outright and no offline cache was ever created. Per-asset add with a
+// per-asset catch keeps install alive and caches everything that can be cached.
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
-      console.log('[Service Worker] Caching all: app shell and content');
-      return cache.addAll(ASSETS_TO_CACHE);
+      console.log('[Service Worker] Caching app shell and content');
+      return Promise.all(
+        ASSETS_TO_CACHE.map((asset) =>
+          cache.add(asset).catch((error) => {
+            // One unavailable asset must not fail the install.
+            console.warn('[Service Worker] Failed to cache:', asset, error);
+          })
+        )
+      );
     })
   );
   self.skipWaiting();
