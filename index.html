@@ -137,6 +137,7 @@
                             class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all">
                     </div>
                     <div class="flex gap-3 justify-end">
+                        <button id="removeKeyBtn" class="hidden mr-auto px-4 py-2 text-red-600 hover:bg-red-50 rounded-lg text-sm font-medium transition-colors">Remove key</button>
                         <button id="cancelKeyBtn" class="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg text-sm font-medium transition-colors">Cancel</button>
                         <button id="saveKeyBtn" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium shadow-md transition-all active:scale-95">Save Key</button>
                     </div>
@@ -244,6 +245,7 @@
         const apiKeyInput = document.getElementById('apiKeyInput');
         const saveKeyBtn = document.getElementById('saveKeyBtn');
         const cancelKeyBtn = document.getElementById('cancelKeyBtn');
+        const removeKeyBtn = document.getElementById('removeKeyBtn');
         const apiKeyStatus = document.getElementById('apiKeyStatus');
         const compareBtn = document.getElementById('compareBtn');
         const city1Input = document.getElementById('city1');
@@ -262,11 +264,25 @@
         updateKeyStatus();
         updateUnitUI();
 
-        apiKeyBtn.addEventListener('click', () => { apiKeyInput.value = apiKey; apiModal.classList.remove('hidden'); });
+        apiKeyBtn.addEventListener('click', () => { apiKeyInput.value = apiKey; updateKeyStatus(); apiModal.classList.remove('hidden'); });
         cancelKeyBtn.addEventListener('click', () => { apiModal.classList.add('hidden'); });
+
+        // Explicit removal. The save handler is guarded by `if (key)`, so clearing the input
+        // and saving could never delete a stored key -- there was no way to remove one at all.
+        removeKeyBtn.addEventListener('click', () => {
+            apiKey = '';
+            localStorage.removeItem('weather_api_key');
+            apiKeyInput.value = '';
+            updateKeyStatus();
+            apiModal.classList.add('hidden');
+            resetResults();
+            showError('API key removed. Add a key to compare weather again.');
+        });
+
         saveKeyBtn.addEventListener('click', () => {
             const key = apiKeyInput.value.trim();
             if (key) { apiKey = key; localStorage.setItem('weather_api_key', apiKey); updateKeyStatus(); apiModal.classList.add('hidden'); if(city1Input.value && city2Input.value) compareWeather(); }
+            else { showError('Enter a key to save, or use "Remove key" to clear the saved one.'); }
         });
         unitToggleBtn.addEventListener('click', () => {
             unitSystem = unitSystem === 'metric' ? 'imperial' : 'metric';
@@ -331,7 +347,24 @@
         function updateKeyStatus() {
             if (apiKey) { apiKeyStatus.textContent = 'API Key Saved'; apiKeyBtn.classList.replace('text-slate-500', 'text-green-600'); keyIconWrapper.innerHTML = '<i data-lucide="check-circle" class="w-4 h-4"></i>'; }
             else { apiKeyStatus.textContent = 'Set API Key'; apiKeyBtn.classList.replace('text-green-600', 'text-slate-500'); keyIconWrapper.innerHTML = '<i data-lucide="key" class="w-4 h-4"></i>'; }
+            // "Remove key" is only meaningful when a key is actually stored.
+            removeKeyBtn.classList.toggle('hidden', !apiKey);
             lucide.createIcons();
+        }
+
+        // Tear down any rendered comparison and its chart observers, so stale weather from a
+        // previous key is not left on screen after the key is removed.
+        function resetResults() {
+            [card1, card2].forEach(card => {
+                const state = chartState.get(card);
+                if (state && state.observer) state.observer.disconnect();
+                chartState.delete(card);
+                card.innerHTML = '';
+                delete card.dataset.cityName;
+                delete card.dataset.flipped;
+            });
+            currentData1 = null; currentData2 = null;
+            resultsArea.classList.add('hidden');
         }
 
         function updateUnitUI() { unitLabel.textContent = unitSystem === 'metric' ? '°C / km/h' : '°F / mph'; }
