@@ -371,6 +371,9 @@
             });
             currentData1 = null; currentData2 = null;
             resultsArea.classList.add('hidden');
+            // Clear the spinner too. Removing the key mid-flight hid the results but left the
+            // spinner turning until the request resolved or the 10s timeout fired.
+            loadingState.classList.add('hidden');
         }
 
         function updateUnitUI() { unitLabel.textContent = unitSystem === 'metric' ? '°C / km/h' : '°F / mph'; }
