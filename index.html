@@ -106,6 +106,25 @@
         }
 
         body { overscroll-behavior-y: none; }
+
+        /* --- Reduced motion ---
+           Four motion sources in this app, all handled here or in showError():
+           (a) the 0.6s 3D card flip
+           (b) hover:scale-105 on #compareBtn
+           (c) the .weather-card hover translateY(-2px) lift
+           (d) the error shake in showError() -- gated in JS, since it uses the Web Animations API
+
+           prefers-reduced-motion removes the ANIMATION, not the state change. The flip keeps its
+           transform structure and only loses its transition, so the face swap is instant: deleting
+           the transform would leave the back face permanently visible, and gating the swap would
+           show the wrong face. (b) and (c) are decoration only, so they are removed outright. */
+        @media (prefers-reduced-motion: reduce) {
+            .card-inner { transition: none; }
+            .weather-card { transition: none; }
+            .weather-card:hover { transform: none; }
+            #compareBtn:hover,
+            #compareBtn:active { transform: none; }
+        }
     </style>
 </head>
 <body class="bg-slate-50 text-slate-800 min-h-screen flex flex-col font-sans selection:bg-blue-100">
@@ -1108,6 +1127,8 @@
             errorMsg.classList.remove('hidden');
             const form = document.getElementById('compareForm');
             if (!form) return;
+            // Respect prefers-reduced-motion: the shake is decoration, the message is the signal.
+            if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
             if (typeof form.animate !== 'function') return;
             form.animate([
                 { transform: 'translateX(0)' },
