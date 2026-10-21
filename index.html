@@ -840,6 +840,15 @@
         function renderCard(element, payload) {
             const data = payload.current;
             const hourly = payload.hourly || [];
+
+            // A partial response can omit weather[] entirely. The old code dereferenced
+            // data.weather[0].icon directly and threw mid-render, leaving a half-written card.
+            // Normalise once here so every downstream use is safe.
+            const weather = (Array.isArray(data.weather) && data.weather[0]) ? data.weather[0] : {};
+            const weatherIcon = weather.icon;
+            const weatherMain = typeof weather.main === 'string' ? weather.main : '';
+            const weatherDescription = typeof weather.description === 'string' ? weather.description : '';
+
             const rawTempC = data.main.temp; const rawFeelsLikeC = data.main.feels_like; const rawWindMs = data.wind.speed;
             let mainTemp, subTemp, mainFeelsLike, mainWindSpeed, mainWindUnit;
 
@@ -854,13 +863,13 @@
             const localTimeStr = getLocalTime(data.timezone);
             // iconCode is interpolated into an attribute, so constrain it to the character set
             // OWM actually uses (e.g. "01d") rather than escaping a URL.
-            const iconCode = String(data.weather[0].icon || '').replace(/[^0-9a-z]/gi, '');
+            const iconCode = String(weatherIcon || '').replace(/[^0-9a-z]/gi, '');
             const iconUrl = `https://openweathermap.org/img/wn/${iconCode}@4x.png`;
 
             // --- TIME OF DAY LOGIC ---
             const nowSeconds = Math.floor(Date.now() / 1000);
             const isDay = nowSeconds >= data.sys.sunrise && nowSeconds < data.sys.sunset;
-            const weatherCondition = data.weather[0].main.toLowerCase();
+            const weatherCondition = weatherMain.toLowerCase();
 
             let bgClass = '';
 
@@ -911,7 +920,7 @@
                                 <span class="text-4xl md:text-6xl font-black ${textContrast.mainText} tracking-tighter">${mainTemp}</span>
                                 <span class="${textContrast.subText} font-medium text-sm md:text-lg">${subTemp}</span>
                             </div>
-                            <img src="${iconUrl}" alt="${esc(data.weather[0].description)}" class="w-16 h-16 md:w-24 md:h-24 md:-mr-4 drop-shadow-md filter brightness-110">
+                            <img src="${iconUrl}" alt="${esc(weatherDescription)}" class="w-16 h-16 md:w-24 md:h-24 md:-mr-4 drop-shadow-md filter brightness-110">
                         </div>
 
                         <!-- Stats Grid (Glassmorphism) -->
@@ -930,7 +939,7 @@
                             </div>
                                 <div class="flex items-center gap-2 md:gap-3">
                                 <div class="p-1.5 md:p-2 bg-white/20 ${textContrast.mainText} rounded-lg shrink-0"><i data-lucide="eye" class="w-4 h-4 md:w-5 md:h-5"></i></div>
-                                <div class="min-w-0"><p class="text-[10px] md:text-xs ${textContrast.subText} font-bold uppercase truncate">Condition</p><p class="font-semibold ${textContrast.mainText} capitalize text-sm md:text-base truncate max-w-[80px]">${esc(data.weather[0].main)}</p></div>
+                                <div class="min-w-0"><p class="text-[10px] md:text-xs ${textContrast.subText} font-bold uppercase truncate">Condition</p><p class="font-semibold ${textContrast.mainText} capitalize text-sm md:text-base truncate max-w-[80px]">${esc(weatherMain || '—')}</p></div>
                             </div>
                         </div>
 
