@@ -474,25 +474,31 @@
                 }
             });
 
-            // Seed today's bucket with current observation
+            // Seed today's bucket with the current observation's CONDITION only.
+            // main.temp_min / main.temp_max from the 2.5 /weather endpoint describe the spread
+            // around the current observation, NOT the day's high and low -- OWM warns they are
+            // unreliable for cities. They must never enter the high/low sets: the daily envelope
+            // comes from the forecast buckets alone, so there is exactly one source of truth.
             const nowDt = Math.floor(Date.now() / 1000);
             const todayLocal = new Date((nowDt + tz) * 1000);
             const todayKey = `${todayLocal.getUTCFullYear()}-${todayLocal.getUTCMonth()}-${todayLocal.getUTCDate()}`;
             if (!buckets[todayKey]) buckets[todayKey] = { highs: [], lows: [], dt: nowDt, condTally: {} };
-            buckets[todayKey].highs.push(current.main.temp_max ?? current.main.temp);
-            buckets[todayKey].lows.push(current.main.temp_min  ?? current.main.temp);
             if (current.weather?.[0]) {
                 const id = current.weather[0].id;
                 buckets[todayKey].condTally[id] = (buckets[todayKey].condTally[id] || 0) + 1;
             }
 
-            const sortedKeys = Object.keys(buckets).sort();
-            const days = sortedKeys.slice(0, 4);
+            // Only buckets that actually hold forecast temperature samples can produce a
+            // high/low. Without this filter, a condition-only "today" bucket would yield
+            // Math.max() of an empty array (-Infinity).
+            const days = Object.keys(buckets)
+                .filter(key => buckets[key].highs.length > 0)
+                .sort()
+                .slice(0, 4);
 
-            if (days.length < 2) {
-                const t = current.main.temp;
-                return [{ dt: nowDt, tempC: t, highC: current.main.temp_max ?? t, lowC: current.main.temp_min ?? t, label: 'Today', condId: current.weather?.[0]?.id ?? null }];
-            }
+            // No forecast => no daily high/low. Degrade honestly by returning nothing, rather
+            // than dressing the observation's temp_min/temp_max up as a daily envelope.
+            if (!days.length) return [];
 
             return days.map((key, idx) => {
                 const b = buckets[key];
