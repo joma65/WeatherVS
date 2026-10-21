@@ -386,18 +386,44 @@
                 throw new Error(`Error fetching data for ${city}`);
             }
             const current = await currentRes.json();
-            let hourly = [];
+
+            // A forecast failure must not be silent: record WHY it is missing so the card can
+            // say so, and keep it distinct from a total request failure (which throws above).
+            let forecastNote = null;
             let forecastList = [];
-            if (forecastRes.ok) {
+            if (!forecastRes.ok) {
+                if (forecastRes.error) {
+                    forecastNote = `Forecast unavailable — ${forecastRes.error.message}`;
+                } else if (forecastRes.status === 401) {
+                    forecastNote = 'Forecast unavailable — API key rejected';
+                } else {
+                    forecastNote = `Forecast unavailable — server returned ${forecastRes.status}`;
+                }
+            } else {
                 try {
                     const forecastJson = await forecastRes.json();
-                    forecastList = forecastJson.list || [];
-                    hourly = buildHourlyTemps(current, forecastJson);
-                } catch (e) { hourly = []; }
+                    forecastList = Array.isArray(forecastJson.list) ? forecastJson.list : [];
+                    if (!forecastList.length) forecastNote = 'Forecast unavailable — no data returned';
+                } catch (e) {
+                    forecastNote = 'Forecast unavailable — response could not be read';
+                }
             }
-            if (!hourly.length) hourly = [{ dt: Math.floor(Date.now() / 1000), tempC: current.main.temp, label: 'Now' }];
+
+            // With no forecast there is no trend to draw. Keep the single real observation point
+            // so the chart degrades to "Trend data unavailable" rather than a flat line that
+            // implies six hours of data we do not have.
+            const hourly = forecastList.length
+                ? buildHourlyTemps(current, { list: forecastList })
+                : [{
+                    dt: Math.floor(Date.now() / 1000),
+                    tempC: current.main.temp,
+                    highC: current.main.temp,
+                    lowC: current.main.temp,
+                    label: 'Now',
+                    interpolated: false
+                }];
             const daily = buildDailyTemps(current, forecastList);
-            return { current, hourly, daily };
+            return { current, hourly, daily, forecastNote };
         }
 
         // 3-hourly forecast -> hourly x-positions across the next 6 hours.
@@ -858,6 +884,13 @@
                                 <div class="min-w-0"><p class="text-[10px] md:text-xs ${textContrast.subText} font-bold uppercase truncate">Condition</p><p class="font-semibold ${textContrast.mainText} capitalize text-sm md:text-base truncate max-w-[80px]">${data.weather[0].main}</p></div>
                             </div>
                         </div>
+
+                        ${payload.forecastNote ? `
+                        <!-- Forecast degraded but current conditions succeeded: say so explicitly. -->
+                        <div class="forecast-note mb-3 md:mb-4 flex items-start gap-1.5 px-2 py-1.5 md:px-3 md:py-2 bg-amber-400/25 border border-amber-200/40 rounded-lg text-[10px] md:text-xs font-semibold leading-tight text-amber-50 ${textShadow}" role="status">
+                            <span aria-hidden="true" class="shrink-0">⚠</span>
+                            <span>${payload.forecastNote}. Current conditions only.</span>
+                        </div>` : ''}
 
                         <!-- Flip hint -->
                         <div class="mt-auto pt-3 md:pt-4 md:mt-4 border-t border-white/20 flex items-center justify-center gap-1 text-[10px] md:text-xs font-bold uppercase tracking-wide ${textContrast.subText}">
