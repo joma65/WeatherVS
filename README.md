@@ -40,13 +40,20 @@ or any static host.
 
 ### Updating the app — the worker and the page are a pair
 
-The worker does not activate itself on update. When a new version is waiting, the page must
-ask it to take over. **The worker half is implemented; the page half is not yet.** Until it
-is, a new worker installs and then waits indefinitely, and existing visitors stay on the
-previous version until every tab is closed — "I reloaded and still see the old code" is
-expected behaviour here, not a bug.
+The worker does not activate itself on update. When a new version is waiting, the page asks it
+to take over. **Both halves are implemented** — the worker in `sw.js` and the client in
+`index.html` (the `#updateContainer` prompt).
 
-The page needs to do four things:
+The behaviour: a new worker installs and parks in the **waiting** state. The page notices,
+shows a dismissible prompt offering the update, and does nothing else until the user acts.
+On **Update**, the page posts `SKIP_WAITING`, the new worker activates, and the page reloads
+once. On **Dismiss**, the old version keeps running and the prompt returns on the next load.
+
+This is deliberate: activating a new worker underneath a running session can serve a
+half-updated app, so the swap waits for a human. It also means **"I reloaded and still see the
+old code" is expected** until the prompt is accepted — that is the design, not a bug.
+
+The contract, for anyone reimplementing or auditing it:
 
 ```js
 reg.addEventListener('updatefound', () => {
@@ -111,11 +118,10 @@ that holds the key server-side.
 See the project backlog for tracked work (README does not enumerate it). Current known
 rough edges, as found:
 
-- **The app does not currently update itself in practice.** `sw.js` waits for a
-  `SKIP_WAITING` message, but the page never sends one — the registration in `index.html` is
-  bare. Existing visitors therefore stay on whatever version they cached until every tab is
-  closed. The worker half is done; the page half (snippet above) is outstanding. This is the
-  highest-impact open item.
+- **The app updates only when the user accepts the prompt.** A new service worker waits
+  rather than activating on its own, so a visitor who never accepts keeps running the version
+  they already had. That is intentional (see the update section above), but it does mean
+  updates are not automatic.
 - **Installability is unverified in a real browser.** `manifest.json` now declares both a
   192px and a 512px icon, which is what Chromium asks for, but nobody has confirmed in Chrome
   that the install affordance appears and that DevTools → Application → Manifest reports the
