@@ -1,12 +1,16 @@
-// v9: network-first navigations + stale-while-revalidate assets (#2). The strategy changed
-// from cache-first-for-everything, so a new cache name forces a clean repopulate under the
-// new rules instead of inheriting entries fetched under the old ones.
-const CACHE_NAME = 'weather-compare-v9';
+// v10: icon.png added to the precache (#38). The asset set grew, so the cache name moves
+// with it -- a worker installing into an existing name would skip assets it thinks it
+// already has.
+//
+// Earlier versions: v9 split network-first navigations from stale-while-revalidate assets
+// (#2); v8 replaced cache.addAll() with per-asset add (#1a). v7 and older served everything
+// cache-first and aborted install on any failed asset.
+const CACHE_NAME = 'weather-compare-v10';
 const ASSETS_TO_CACHE = [
   './',
 './index.html',
 './manifest.json',
-// Removed local icons from cache list since we use external URL
+'./icon.png',
 'https://cdn.tailwindcss.com',
 'https://unpkg.com/lucide@latest'
 ];
