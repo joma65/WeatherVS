@@ -561,88 +561,116 @@
                 }
             }
 
-            // With no forecast there is no trend to draw. Keep the single real observation point
-            // so the chart degrades to "Trend data unavailable" rather than a flat line that
-            // implies six hours of data we do not have.
-            const hourly = forecastList.length
-                ? buildHourlyTemps(current, { list: forecastList })
-                : [{
-                    dt: Math.floor(Date.now() / 1000),
-                    tempC: current.main.temp,
-                    highC: current.main.temp,
-                    lowC: current.main.temp,
-                    label: 'Now',
-                    interpolated: false
-                }];
+            // With no forecast there is no trend to draw. buildHourlyTemps() returns [] in that
+            // case, and the chart says "Trend data unavailable" instead of drawing a flat line
+            // that implies six hours of data we do not have.
+            const hourly = buildHourlyTemps(current, { list: forecastList });
             const daily = buildDailyTemps(current, forecastList);
             return { current, hourly, daily, forecastNote };
         }
 
-        // 3-hourly forecast -> hourly x-positions across the next 6 hours.
-        // The temp LINE is linearly interpolated between 3-hourly samples, which is a
-        // defensible smoothing of a single measurement. The high/low BAND comes from the
-        // forecast buckets' own min/max. Each point records whether it sits on a real bucket,
-        // so the chart can refuse to print H:/L: numbers for positions it invented.
+        // --- Hourly trend data: "now" -> now + HOURLY_WINDOW_HOURS ---
+        // The OpenWeatherMap forecast endpoint is 3-hourly, so a 6 h window holds at most two
+        // real buckets. Materialising 7 hourly points was both a fiction (six of them were
+        // interpolated) and the cause of the missing value labels: each synthesized hour was
+        // matched against `bucket.dt` by exact equality, never matched the 3-hourly UTC grid,
+        // and was then flagged `interpolated`, which suppressed the labels entirely.
+        //
+        // A straight segment between two real buckets already IS the linear interpolation, so
+        // hourly samples are not turned into points at all. Points are: the observation, every
+        // real bucket inside the window, and one closing sample on the window edge. Only the
+        // closing sample is derived, and the chart marks it with a hollow dot so the shape can
+        // stay honest about which readings were measured and which were interpolated.
+        const HOURLY_WINDOW_HOURS = 6;
+
         function buildHourlyTemps(current, forecast) {
             const now = Math.floor(Date.now() / 1000);
+            const t0 = now;
+            const t1 = now + HOURLY_WINDOW_HOURS * 3600;
 
-            const midSamples = [{ dt: now, v: current.main.temp }];
-            const bandByDt = new Map();
+            const samples = ((forecast && forecast.list) || [])
+                .filter(item => item && typeof item.dt === 'number' && item.main && typeof item.main.temp === 'number')
+                .map(item => ({
+                    dt: item.dt,
+                    tempC: item.main.temp,
+                    highC: item.main.temp_max ?? item.main.temp,
+                    lowC: item.main.temp_min ?? item.main.temp
+                }))
+                .sort((a, b) => a.dt - b.dt);
 
-            (forecast.list || []).forEach(item => {
-                if (!item?.main || typeof item.main.temp !== 'number') return;
-                midSamples.push({ dt: item.dt, v: item.main.temp });
-                bandByDt.set(item.dt, {
-                    hi: item.main.temp_max ?? item.main.temp,
-                    lo: item.main.temp_min ?? item.main.temp
-                });
-            });
+            // No usable forecast samples => no trend. Returning [] lets the chart say so rather
+            // than drawing a flat line that implies six hours of data we do not have.
+            if (!samples.length) return [];
 
-            const sort = arr => arr.sort((a, b) => a.dt - b.dt);
-            sort(midSamples);
-            const maxSamples = sort([...bandByDt.entries()].map(([dt, v]) => ({ dt, v: v.hi })));
-            const minSamples = sort([...bandByDt.entries()].map(([dt, v]) => ({ dt, v: v.lo })));
-
-            // Returns null (not 0) when there is nothing to interpolate: a missing forecast
-            // must not silently become 0°C.
-            const interp = (samples, t) => {
-                if (!samples.length) return null;
-                if (t <= samples[0].dt) return samples[0].v;
+            // Piecewise-linear lookup over the real samples. It reads a NAMED FIELD off the
+            // sample objects: an earlier version mapped a value-only selector into this
+            // function and then read .dt/.v off the resulting numbers, so every comparison
+            // against undefined failed, the closing sample came back undefined, and the whole
+            // plot collapsed outside the viewBox. Keep the {dt, <field>} shape intact.
+            const interpolateAt = (field, t) => {
+                const first = samples[0];
+                if (t <= first.dt) return first[field];
+                const last = samples[samples.length - 1];
+                if (t >= last.dt) return last[field];
                 for (let i = 1; i < samples.length; i++) {
                     const prev = samples[i - 1], next = samples[i];
                     if (t <= next.dt) {
-                        const gap = (next.dt - prev.dt) || 1;
-                        return prev.v + (t - prev.dt) / gap * (next.v - prev.v);
+                        const gap = next.dt - prev.dt;
+                        if (gap <= 0) return next[field];
+                        return prev[field] + ((t - prev.dt) / gap) * (next[field] - prev[field]);
                     }
                 }
-                return samples[samples.length - 1].v;
+                return last[field];
             };
 
+            const nowTempC = typeof current?.main?.temp === 'number' ? current.main.temp : samples[0].tempC;
+            const tz = current?.timezone;
+
+            // "Now" is a single reading, not a window: the 2.5 /weather endpoint reports one
+            // temperature and no meaningful spread. The band therefore starts collapsed on that
+            // reading and fans out to the first forecast window. Giving it a borrowed envelope
+            // instead drew a flat segment across the left edge that then kinked at the first
+            // bucket -- so it starts on itself, which is what the left-hand point means.
             const points = [{
-                dt: now,
-                tempC: current.main.temp,
-                // At the observation instant only temp is a real measurement. Collapse the band
-                // instead of dressing up the observation's unreliable temp_min/temp_max as spread.
-                highC: current.main.temp,
-                lowC: current.main.temp,
+                dt: t0,
+                tempC: nowTempC,
+                highC: nowTempC,
+                lowC: nowTempC,
                 label: 'Now',
-                interpolated: false
+                interpolated: false,
+                // A single measured value, not a high/low window: label and mark it as one.
+                observed: true
             }];
 
-            for (let h = 1; h <= 6; h++) {
-                const target = now + (h * 3600);
-                const tempC = interp(midSamples, target) ?? current.main.temp;
-                const sample = bandByDt.get(target);
+            samples.forEach(b => {
+                if (b.dt <= t0 || b.dt > t1) return;
                 points.push({
-                    dt: target,
-                    tempC,
-                    highC: sample ? sample.hi : (interp(maxSamples, target) ?? tempC),
-                    lowC:  sample ? sample.lo : (interp(minSamples, target) ?? tempC),
-                    label: formatHourLabel(target, current.timezone),
-                    // True only where a real 3-hourly bucket lands on this hour.
-                    interpolated: !sample
+                    dt: b.dt,
+                    tempC: b.tempC,
+                    highC: b.highC,
+                    lowC: b.lowC,
+                    label: formatHourLabel(b.dt, tz),
+                    interpolated: false
+                });
+            });
+
+            // Close the window on the horizon so the x span really is "now to now + 6 h", rather
+            // than stopping at the last sample inside it. Only done when the horizon is bracketed
+            // by real samples: if the response is degraded and stops short, ending the axis at
+            // the last real bucket is honest, whereas extending it would invent a flat segment.
+            const lastPoint = points[points.length - 1];
+            const lastSample = samples[samples.length - 1];
+            if (lastPoint.dt < t1 && t1 <= lastSample.dt) {
+                points.push({
+                    dt: t1,
+                    tempC: interpolateAt('tempC', t1),
+                    highC: interpolateAt('highC', t1),
+                    lowC: interpolateAt('lowC', t1),
+                    label: formatHourLabel(t1, tz),
+                    interpolated: true
                 });
             }
+
             return points;
         }
 
@@ -755,14 +783,59 @@
 
         // --- Inline SVG line chart (no external chart library) ---
         // Dual high/low lines with a shaded band between them.
-        function buildTempChartSVG(points, gradientId, width, height) {
-            if (points.length < 2) {
+        //
+        // opts.timeAxis: position points by timestamp instead of by index. Used by the hourly
+        // view, where real 3-hourly samples sit at uneven offsets from "now". The daily view
+        // keeps index spacing: each of its points stands for a whole day, not an instant, and
+        // evening-to-midnight buckets would otherwise bunch up at one end.
+        function buildTempChartSVG(points, gradientId, width, height, opts) {
+            const options = opts || {};
+            if (!Array.isArray(points) || points.length < 2) {
                 return `<span class="text-white/80 text-xs font-medium">Trend data unavailable</span>`;
             }
 
+            const timeAxis = !!options.timeAxis
+                && points.every(p => typeof p.dt === 'number')
+                && points[points.length - 1].dt > points[0].dt;
+            const tz = options.tz || 0;
+            const t0 = points[0].dt;
+            const t1 = points[points.length - 1].dt;
+
+            const finiteOrNull = v => (typeof v === 'number' && Number.isFinite(v)) ? v : null;
+            const rawHigh  = points.map(p => finiteOrNull(displayTemp(p.highC)));
+            const rawLow   = points.map(p => finiteOrNull(displayTemp(p.lowC)));
+            const tempVals = points.map(p => finiteOrNull(displayTemp(p.tempC)));
+
+            // A single missing reading must not poison the axis. Math.min/max over one null-ish
+            // coordinate yields NaN, `span` then falls back to 1 and every point is mapped
+            // hundreds of pixels outside the viewBox -- the chart renders empty rather than
+            // wrong, which reads as "the forecast is missing". Carry the nearest known reading
+            // so the geometry stays finite, and refuse to draw at all if nothing is known.
+            const anchorValue = arr => {
+                const firstIdx = arr.findIndex(v => v !== null);
+                if (firstIdx === -1) return null;
+                let last = arr[firstIdx];
+                return arr.map(v => (v === null ? last : (last = v)));
+            };
+            const highVals = anchorValue(rawHigh);
+            const lowVals  = anchorValue(rawLow);
+            if (!highVals || !lowVals) {
+                return `<span class="text-white/80 text-xs font-medium">Trend data unavailable</span>`;
+            }
+
+            // Collapse is a fact about the DATA, so it is decided in source units (°C) and never
+            // in display units. Testing converted values made the same point degenerate at one
+            // threshold in °C and a different one in °F, because a 0.5° test is 0.9° of the
+            // smaller Fahrenheit degree -- so a band printed one label in metric and two in
+            // imperial. The band is degenerate only when high and low are genuinely the same.
+            const isDegenerate = i => {
+                const p = points[i];
+                if (typeof p.highC !== 'number' || typeof p.lowC !== 'number') return true;
+                if (!Number.isFinite(p.highC) || !Number.isFinite(p.lowC)) return true;
+                return Math.abs(p.highC - p.lowC) < 0.01;
+            };
+
             const hasCondIcons = points.some(p => p.condId != null);
-            const highVals = points.map(p => displayTemp(p.highC));
-            const lowVals  = points.map(p => displayTemp(p.lowC));
 
             const W = Math.max(120, Math.round(width));
             const H = Math.max(120, Math.round(height));
@@ -772,38 +845,107 @@
             const iconFont = tight ? 11 : 13;
             const iconSize = iconFont + 3;
 
-            const pad = { top: tight ? 28 : 36, right: tight ? 16 : 26, bottom: tight ? 22 : 28, left: tight ? 16 : 26 };
-            if (hasCondIcons) pad.bottom += iconSize;
+            const padLeft  = tight ? 16 : 26;
+            const padRight = tight ? 16 : 26;
+            const innerW = W - padLeft - padRight;
 
+            const xOfDt = dt => padLeft + ((dt - t0) / (t1 - t0)) * innerW;
+            const xAt = i => timeAxis ? xOfDt(points[i].dt) : padLeft + (innerW * i) / (points.length - 1);
+
+            const haloStyle = 'paint-order:stroke;stroke-linejoin:round;';
             const estWidth = (text, font) => text.length * font * 0.6;
+            const clampX = (x, tw) => Math.min(Math.max(x, tw / 2 + 2), W - tw / 2 - 2);
 
-            const innerW = W - pad.left - pad.right;
-            const stepX  = innerW / (points.length - 1);
-
-            // Fit plan for x-axis labels
-            function fitPlan(maxLabelW, step, gap) {
-                if (maxLabelW + gap <= step) return { every: 1, bands: 1 };
-                if (maxLabelW + gap <= step * 2) return { every: 1, bands: 2 };
-                if (maxLabelW + gap <= step * 4) return { every: 2, bands: 2 };
-                return { every: 3, bands: 2 };
+            // Thin by available pixels rather than by index parity. Under even spacing "every
+            // other point" is workable, but with real timestamps a bucket can land close to the
+            // window edge, where parity both overlaps and leaves gaps. The last item of a row is
+            // reserved -- dropping it leaves the axis visibly unfinished.
+            function thinRow(items, gap) {
+                const kept = [];
+                const lastIndex = items.length - 1;
+                items.forEach((it, n) => {
+                    const prev = kept[kept.length - 1];
+                    if (prev && it.left - prev.right < gap) {
+                        if (n !== lastIndex) return;
+                        kept.pop();
+                    }
+                    kept.push(it);
+                });
+                return kept;
             }
-            const xPlan = fitPlan(Math.max(...points.map(p => estWidth(p.label, xFont))), stepX, 4);
-            if (xPlan.bands > 1) pad.bottom += xFont + 5;
+
+            function fitRows(items, rowCount) {
+                const rows = Array.from({ length: rowCount }, () => []);
+                items.forEach((it, n) => rows[n % rowCount].push(it));
+                return rows.map(row => thinRow(row, 4));
+            }
+
+            // --- X-axis furniture ---
+            // The hourly view gets a true clock axis (Now, +1 h ... +6 h), because its data
+            // points sit at uneven times and an index axis would imply hourly samples. The daily
+            // view labels its four day buckets directly.
+            const tickItems = [];
+            if (timeAxis) {
+                for (let t = t0; t < t1; t += 3600) {
+                    tickItems.push({ text: t === t0 ? 'Now' : formatHourLabel(t, tz), x: xOfDt(t) });
+                }
+                tickItems.push({ text: formatHourLabel(t1, tz), x: xOfDt(t1) });
+            } else {
+                points.forEach((p, i) => tickItems.push({ text: p.label, x: xAt(i) }));
+            }
+            const axisTicks = tickItems.map(tick => {
+                const tw = estWidth(tick.text, xFont);
+                const cx = clampX(tick.x, tw);
+                return { text: tick.text, cx, left: cx - tw / 2, right: cx + tw / 2 };
+            });
+
+            const totalKept = rows => rows.reduce((n, r) => n + r.length, 0);
+            let labelRows = fitRows(axisTicks, 1);
+            if (totalKept(labelRows) < axisTicks.length && axisTicks.length > 2) {
+                labelRows = fitRows(axisTicks, 2);
+            }
+
+            // --- Bottom padding ---
+            // Two bands live under the plot: the x-axis ticks, and the below-lane value labels
+            // that hang just beneath the plot floor. Both must be reserved. Reserving only the
+            // label's OFFSET left the two bands overlapping, so on a flat series -- where the
+            // low dot sits exactly on the plot floor -- the right-most L: label was drawn into
+            // the tick row and overprinted by the hour mark. The label's own text height is part
+            // of the reservation now, not just its distance from the floor.
+            const tickBlock = xFont + 6
+                + Math.max(0, labelRows.length - 1) * (xFont + 5)
+                + (hasCondIcons ? iconSize + 4 : 0);
+            const valueLabelOffset = valFont + 5;              // floor -> label baseline
+            const valueLabelBlock = valueLabelOffset + valFont + 4; // baseline -> descender + gap
+
+            const pad = {
+                top: tight ? 28 : 36,
+                right: padRight,
+                left: padLeft,
+                bottom: tickBlock + valueLabelBlock
+            };
 
             const availH = H - pad.top - pad.bottom;
             const plotH  = Math.max(60, Math.min(availH, Math.max(W * 1.6, 170)));
             const topY   = pad.top + Math.max(0, (availH - plotH) / 2);
-            const baseY  = topY + plotH;
 
-            // Scale from a unified range covering both highs and lows
+            // Scale from a unified range covering both highs and lows. The minimum span has to
+            // be stated in the unit that is actually on screen: 5 °C and 9 °F are the same
+            // span, so a floor of "5" stretched the identical data ~1.8x taller in Fahrenheit
+            // and the card visibly resized when the unit was toggled.
+            const MIN_SPAN = unitSystem === 'metric' ? 5 : 9;
             let minV = Math.min(...lowVals);
             let maxV = Math.max(...highVals);
-            if (maxV - minV < 5) { const mid = (maxV + minV) / 2; minV = mid - 2.5; maxV = mid + 2.5; }
+            if (maxV - minV < MIN_SPAN) {
+                const mid = (maxV + minV) / 2;
+                minV = mid - MIN_SPAN / 2;
+                maxV = mid + MIN_SPAN / 2;
+            }
             const span = (maxV - minV) || 1;
             const toY  = v => topY + (1 - (v - minV) / span) * plotH;
 
-            const hPts = highVals.map((v, i) => ({ x: pad.left + i * stepX, y: toY(v) }));
-            const lPts = lowVals.map( (v, i) => ({ x: pad.left + i * stepX, y: toY(v) }));
+            const hPts = highVals.map((v, i) => ({ x: xAt(i), y: toY(v) }));
+            const lPts = lowVals.map( (v, i) => ({ x: xAt(i), y: toY(v) }));
 
             const pathD = pts => `M ${pts.map(p => `${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' L ')}`;
 
@@ -817,51 +959,92 @@
             }).join('');
 
             const filterId = `${gradientId}-ts`;
-            const haloStyle = 'paint-order:stroke;stroke-linejoin:round;';
-            const clampX = (x, tw) => Math.min(Math.max(x, tw / 2 + 2), W - tw / 2 - 2);
             const makeLabel = (text, x, y) => {
                 const tw = estWidth(text, valFont);
                 return `<text x="${clampX(x, tw).toFixed(1)}" y="${y.toFixed(1)}" text-anchor="middle" font-size="${valFont}" font-weight="700" fill="#ffffff" style="${haloStyle}stroke:rgba(10,15,30,0.92);stroke-width:4px;" filter="url(#${filterId})">${text}</text>`;
             };
 
-            // Dots + H/L value labels
+            // --- Dots ---
+            // A derived point (the window edge) is drawn hollow and open: interpolation is fine
+            // to show, but the dot says "this reading was calculated, not measured".
+            const highColor = '#fcd34d';
+            const lowColor  = '#7dd3fc';
+            const observedColor = '#ffffff';
+            const dotR = tight ? 2.5 : 3;
+            const dot = (x, y, fill, hollow) => hollow
+                ? `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${dotR}" fill="none" stroke="${fill}" stroke-width="1.6" stroke-opacity="0.9"/>`
+                : `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${dotR}" fill="${fill}" stroke="rgba(10,15,30,0.5)" stroke-width="1.5"/>`;
+
+            // --- Value labels ---
+            // Every label above the curve shares one lane and every label below shares another,
+            // so an H: label can never overprint an L: label next to it. On a narrow card the
+            // prefixes are dropped: the amber/sky dots already carry that meaning.
+            //
+            // Interpolation is NOT a reason to withhold a number, so a derived point prints the
+            // same H:/L: pair as a measured one. Withholding them previously dropped the closing
+            // point's low entirely -- it printed a single mid-value above the dot, which read as
+            // a high, and no L: ever appeared. Only a genuinely collapsed band prints one value,
+            // and then it prints no L: at all rather than repeating the same number below.
+            const aboveLane = [];
+            const belowLane = [];
             let dotsHtml = '';
+
             points.forEach((pt, i) => {
-                const hx = hPts[i].x, hy = hPts[i].y;
-                const lx = lPts[i].x, ly = lPts[i].y;
-                const rH = tight ? 2.5 : 3, rL = tight ? 2.5 : 3;
+                const hollow = !!pt.interpolated;
+                const degenerate = isDegenerate(i);
+                const labelGap = valFont + 5;
 
-                // High dot (amber)
-                dotsHtml += `<circle cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="${rH}" fill="#fcd34d" stroke="rgba(10,15,30,0.5)" stroke-width="1.5"/>`;
-                // Low dot (sky)
-                dotsHtml += `<circle cx="${lx.toFixed(1)}" cy="${ly.toFixed(1)}" r="${rL}" fill="#7dd3fc" stroke="rgba(10,15,30,0.5)" stroke-width="1.5"/>`;
+                // The observation is one reading, not a window: the band starts collapsed on it.
+                // It gets its own marker and a single value, never an H:/L: pair.
+                if (pt.observed) {
+                    dotsHtml += `<circle cx="${hPts[i].x.toFixed(1)}" cy="${hPts[i].y.toFixed(1)}" r="${dotR + 0.5}" fill="${observedColor}" stroke="rgba(10,15,30,0.65)" stroke-width="1.5"/>`;
+                    if (tempVals[i] !== null) {
+                        aboveLane.push({ x: hPts[i].x, y: hPts[i].y - 8, text: `${Math.round(tempVals[i])}°` });
+                    }
+                    return;
+                }
 
-                // Labels: show every point for daily (few points), otherwise every-other for hourly.
-                // Points flagged interpolated sit between real 3-hourly buckets, so their H:/L:
-                // numbers would be invented values dressed up as measurements -- the dots and the
-                // band still show the shape, but no number is printed for them.
-                const showEvery = points.length <= 4 ? 1 : 2;
-                if ((i % showEvery === 0 || i === points.length - 1) && !pt.interpolated) {
-                    const hText = `H:${Math.round(highVals[i])}°`;
-                    const lText = `L:${Math.round(lowVals[i])}°`;
-                    // High label above high dot; low label below low dot
-                    const labelGap = valFont + 5;
-                    dotsHtml += makeLabel(hText, hx, hy - 7);
-                    dotsHtml += makeLabel(lText, lx, ly + labelGap);
+                const measured = rawHigh[i] !== null && rawLow[i] !== null;
+
+                dotsHtml += dot(hPts[i].x, hPts[i].y, highColor, hollow);
+                if (!degenerate) dotsHtml += dot(lPts[i].x, lPts[i].y, lowColor, hollow);
+
+                if (!measured) return;
+
+                if (degenerate) {
+                    aboveLane.push({ x: hPts[i].x, y: hPts[i].y - 7, text: `${Math.round(highVals[i])}°` });
+                } else {
+                    aboveLane.push({ x: hPts[i].x, y: hPts[i].y - 7, text: `${tight ? '' : 'H:'}${Math.round(highVals[i])}°` });
+                    belowLane.push({ x: lPts[i].x, y: lPts[i].y + labelGap, text: `${tight ? '' : 'L:'}${Math.round(lowVals[i])}°` });
                 }
             });
 
-            // X-axis labels
-            const row0Y = H - (hasCondIcons ? iconSize + 5 : 6);
-            const row1Y = row0Y - (xFont + 5);
-            const xLabels = hPts.map((p, i) => {
-                if (!(i % xPlan.every === 0 || i === hPts.length - 1)) return '';
-                const text = points[i].label;
-                const tw = estWidth(text, xFont);
-                const row = Math.floor(i / xPlan.every) % xPlan.bands;
-                const y = row === 1 ? row1Y : row0Y;
-                return `<text x="${clampX(p.x, tw).toFixed(1)}" y="${y.toFixed(1)}" text-anchor="middle" font-size="${xFont}" font-weight="600" fill="rgba(255,255,255,0.92)" style="${haloStyle}stroke:rgba(10,15,30,0.85);stroke-width:3.5px;" filter="url(#${filterId})">${text}</text>`;
-            }).join('');
+            // Below-lane labels may not enter the tick block, whatever the geometry does.
+            const belowCeiling = H - tickBlock - 4;
+            const buildLane = (places, minY, maxY) => {
+                const kept = [];
+                places.forEach((place, n) => {
+                    const tw = estWidth(place.text, valFont);
+                    const x = clampX(place.x, tw);
+                    const y = Math.min(Math.max(place.y, minY), maxY);
+                    const prev = kept[kept.length - 1];
+                    if (prev && x - tw / 2 < prev.right + 2) {
+                        if (n !== places.length - 1) return;
+                        kept.pop();
+                    }
+                    kept.push({ text: place.text, x, y, right: x + tw / 2 });
+                });
+                return kept.map(l => makeLabel(l.text, l.x, l.y)).join('');
+            };
+            const valueLabels = buildLane(aboveLane, valFont + 4, H)
+                + buildLane(belowLane, 0, belowCeiling);
+
+            // --- X-axis labels ---
+            const labelBaseY = H - 6 - (hasCondIcons ? iconSize + 4 : 0);
+            const rowY = r => labelBaseY - (labelRows.length - 1 - r) * (xFont + 5);
+            const xLabels = labelRows.map((row, r) => row.map(t =>
+                `<text x="${t.cx.toFixed(1)}" y="${rowY(r).toFixed(1)}" text-anchor="middle" font-size="${xFont}" font-weight="600" fill="rgba(255,255,255,0.92)" style="${haloStyle}stroke:rgba(10,15,30,0.85);stroke-width:3.5px;" filter="url(#${filterId})">${t.text}</text>`
+            ).join('')).join('');
 
             // Condition icons (daily mode) as HTML inside foreignObject
             const iconY = H - iconSize - 1;
@@ -874,8 +1057,18 @@
                     </foreignObject>`;
             }).join('') : '';
 
+            // The chart is role="img": thinning labels must not make it silent for screen
+            // readers, so the actual readings are carried in the accessible name instead.
+            const unit = tempUnitSuffix();
+            const described = points
+                .map((p, i) => tempVals[i] == null ? '' : `${p.label} ${Math.round(tempVals[i])}${unit}`)
+                .filter(Boolean)
+                .join(', ');
+            const derivedNote = points.some(p => p.interpolated) ? ' Hollow marks are interpolated.' : '';
+            const ariaLabel = `Temperature trend: ${described}.${derivedNote}`;
+
             return `
-            <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="none" role="img" aria-label="High/low temperature trend">
+            <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="none" role="img" aria-label="${esc(ariaLabel)}">
                 <defs>
                     <linearGradient id="${gradientId}-band" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="0%" stop-color="#fcd34d" stop-opacity="0.25"/>
@@ -887,9 +1080,10 @@
                 </defs>
                 ${grid}
                 <path d="${bandPath}" fill="url(#${gradientId}-band)"/>
-                <path d="${pathD(hPts)}" fill="none" stroke="#fcd34d" stroke-width="${tight ? 1.8 : 2.2}" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
-                <path d="${pathD(lPts)}" fill="none" stroke="#7dd3fc" stroke-width="${tight ? 1.8 : 2.2}" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
+                <path d="${pathD(hPts)}" fill="none" stroke="${highColor}" stroke-width="${tight ? 1.8 : 2.2}" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
+                <path d="${pathD(lPts)}" fill="none" stroke="${lowColor}" stroke-width="${tight ? 1.8 : 2.2}" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
                 ${dotsHtml}
+                ${valueLabels}
                 ${xLabels}
                 ${condIcons}
             </svg>`;
@@ -898,7 +1092,7 @@
         // --- Chart mounting / responsive redraw ---
         const chartState = new WeakMap();
 
-        function mountChart(element, hourly, daily) {
+        function mountChart(element, hourly, daily, tz) {
             const host = element.querySelector('.chart-host');
             if (!host) return;
 
@@ -907,7 +1101,7 @@
 
             // Preserve mode across re-mounts (unit toggle, re-compare)
             const prevMode = previous ? previous.mode : 'hourly';
-            const state = { hourly, daily: daily || [], mode: prevMode, observer: null, lastW: 0, lastH: 0, frame: null };
+            const state = { hourly, daily: daily || [], mode: prevMode, tz: tz || 0, observer: null, lastW: 0, lastH: 0, frame: null };
             chartState.set(element, state);
 
             state.activeData = () => state.mode === '3day' ? state.daily : state.hourly;
@@ -919,7 +1113,12 @@
                 const h = Math.round(rect.height);
                 if (Math.abs(w - state.lastW) < 3 && Math.abs(h - state.lastH) < 3) return;
                 state.lastW = w; state.lastH = h;
-                host.innerHTML = buildTempChartSVG(state.activeData(), `chart-grad-${element.id}`, w, h);
+                // Only the hourly view is timestamp-positioned; the daily view stays index-spaced
+                // because each of its points stands for a whole day rather than an instant.
+                host.innerHTML = buildTempChartSVG(state.activeData(), `chart-grad-${element.id}`, w, h, {
+                    timeAxis: state.mode === 'hourly',
+                    tz: state.tz
+                });
             };
 
             state.schedule = () => {
@@ -1109,7 +1308,7 @@
             </div>
         `;
 
-            mountChart(element, hourly, payload.daily || []);
+            mountChart(element, hourly, payload.daily || [], data.timezone);
 
             // Essential, not redundant: renderCard rebuilds innerHTML on every unit toggle and
             // re-compare, while the template preserves .flipped. A freshly written face has no

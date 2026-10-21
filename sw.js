@@ -1,3 +1,29 @@
+// v17: two chart corrections. The observation point is collapsed onto the current reading
+// again (high == low == temp) so the band starts from a single place at "Now" -- the v16
+// borrowed envelope drew a flat segment across the left edge and then kinked. The bottom
+// padding now reserves the below-lane value label's full height on top of the x-axis tick
+// block, instead of only its offset, so the right-most L: label clears the hour mark.
+//
+// v16: chart geometry fixes. The observation now carries an extrapolated band so the shaded
+// region no longer pinches to zero width at the left edge and snaps open at the first bucket
+// (the vertical spike), and the observation is drawn as one measured marker instead of an
+// H:/L: pair. The plot's bottom padding now reserves the below-lane label band as well as the
+// x-axis ticks, so the right-most L: label is no longer overprinted by the hour mark.
+//
+// v15: unit-toggle defects in the trend chart. Collapse detection and the minimum plot span
+// were both computed from converted values, so the same data printed one label in °C and two
+// in °F, and the card's plot grew ~1.8x taller in °F. Both are now expressed in source °C.
+// Interpolated points also print a full H:/L: pair -- withholding them dropped the closing
+// point's low entirely.
+//
+// v14: fixes the hourly trend rendering nothing. buildHourlyTemps() read .dt/.v off numbers
+// produced by a value-only selector, so its interpolation returned undefined, the chart
+// domain became NaN, and every point was mapped outside the viewBox.
+//
+// v13: hourly trend rebuilt around real forecast timestamps. The chart used to synthesize 7
+// hourly points, match them against the 3-hourly forecast grid by exact timestamp equality,
+// fail to match, and suppress the value labels -- so only "Now" ever printed a temperature.
+//
 // v12: lucide pinned to an exact version AND a full file path (#1b). The precached URL
 // changed, so the cache name moves with it -- a worker installing into the existing name
 // would treat the old lucide entry as present and skip fetching the new one.
@@ -14,7 +40,7 @@
 // network-first navigations from stale-while-revalidate assets (#2); v8 replaced
 // cache.addAll() with per-asset add (#1a). v7 and older served everything cache-first and
 // aborted install on any failed asset.
-const CACHE_NAME = 'weather-compare-v12';
+const CACHE_NAME = 'weather-compare-v17';
 const ASSETS_TO_CACHE = [
   './',
 './index.html',
@@ -69,10 +95,10 @@ self.addEventListener('install', (event) => {
       console.log('[Service Worker] Caching app shell and content');
       return Promise.all(
         ASSETS_TO_CACHE.map((asset) =>
-          cache.add(asset).catch((error) => {
-            // One unavailable asset must not fail the install.
-            console.warn('[Service Worker] Failed to cache:', asset, error);
-          })
+        cache.add(asset).catch((error) => {
+          // One unavailable asset must not fail the install.
+          console.warn('[Service Worker] Failed to cache:', asset, error);
+        })
         )
       );
     })
@@ -112,13 +138,13 @@ async function staleWhileRevalidate(request) {
   const cache = await caches.open(CACHE_NAME);
   const cached = await cache.match(request, MATCH_OPTIONS);
   const network = fetch(request)
-    .then((response) => {
-      if (isCacheable(response)) {
-        cache.put(request, response.clone());
-      }
-      return response;
-    })
-    .catch(() => null);
+  .then((response) => {
+    if (isCacheable(response)) {
+      cache.put(request, response.clone());
+    }
+    return response;
+  })
+  .catch(() => null);
   return cached || (await network) || Response.error();
 }
 
