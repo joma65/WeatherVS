@@ -350,12 +350,36 @@
             } catch (err) { loadingState.classList.add('hidden'); showError(err.message); }
         }
 
+        // Every request gets a hard deadline. A hung request must not strand the spinner:
+        // AbortController fires, the fetch rejects, and the caller renders an error state.
+        const REQUEST_TIMEOUT_MS = 10000;
+
+        async function fetchWithTimeout(url, timeoutMs = REQUEST_TIMEOUT_MS) {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), timeoutMs);
+            try {
+                return await fetch(url, { signal: controller.signal });
+            } catch (err) {
+                if (err.name === 'AbortError') throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s`);
+                throw err;
+            } finally {
+                clearTimeout(timer);
+            }
+        }
+
         async function fetchWeather(city) {
             const query = `q=${encodeURIComponent(city)}&appid=${apiKey}&units=metric`;
-            const [currentRes, forecastRes] = await Promise.all([
-                fetch(`https://api.openweathermap.org/data/2.5/weather?${query}`),
-                fetch(`https://api.openweathermap.org/data/2.5/forecast?${query}&cnt=24`)
-            ]);
+            const currentUrl = `https://api.openweathermap.org/data/2.5/weather?${query}`;
+            const forecastUrl = `https://api.openweathermap.org/data/2.5/forecast?${query}&cnt=24`;
+            let currentRes, forecastRes;
+            try {
+                // The forecast is optional: if it fails or times out we degrade to a
+                // current-conditions card rather than failing the whole comparison.
+                const forecastPromise = fetchWithTimeout(forecastUrl).catch(err => ({ ok: false, error: err }));
+                [currentRes, forecastRes] = await Promise.all([fetchWithTimeout(currentUrl), forecastPromise]);
+            } catch (err) {
+                throw new Error(`Could not reach OpenWeatherMap for ${city}. ${err.message}`);
+            }
             if (!currentRes.ok) {
                 if (currentRes.status === 401) throw new Error('Invalid API Key.');
                 if (currentRes.status === 404) throw new Error(`City "${city}" not found.`);
