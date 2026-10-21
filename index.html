@@ -32,7 +32,22 @@
             transform: translateY(-2px);
             box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
         }
-        .weather-card:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+        /* The container is no longer focusable (the flip controls are real buttons), so the
+           old .weather-card:focus-visible ring was dead code. The controls get the ring. */
+        .trend-toggle:focus-visible,
+        .flip-toggle:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+
+        /* Flip controls are <button> elements, so strip the UA button chrome and inherit text. */
+        .flip-toggle {
+            background: none;
+            border: 0;
+            padding: 0;
+            font: inherit;
+            color: inherit;
+            cursor: pointer;
+            appearance: none;
+            -webkit-appearance: none;
+        }
 
         /* --- Flip Card --- */
         .card-inner {
@@ -358,17 +373,12 @@
         [city1Input, city2Input].forEach(input => { input.addEventListener('keypress', (e) => { if (e.key === 'Enter') compareWeather(); }); });
 
         // --- Card Flip (event delegation so it survives innerHTML re-renders) ---
+        // The flip controls are real <button>s, so Enter/Space produce a click natively and the
+        // old keydown handler for the focusable container is gone with the role/tabindex.
         resultsArea.addEventListener('click', (e) => {
             if (e.target.closest('.trend-toggle')) return; // handled separately
             const card = e.target.closest('.weather-card');
             if (card) toggleCard(card);
-        });
-        resultsArea.addEventListener('keydown', (e) => {
-            if (e.key !== 'Enter' && e.key !== ' ') return;
-            const card = e.target.closest('.weather-card');
-            if (!card) return;
-            e.preventDefault();
-            toggleCard(card);
         });
 
         // Trend mode toggle (delegated, on the back face)
@@ -381,14 +391,33 @@
             toggleChartMode(card);
         });
 
+        // Only the visible face may be in the accessibility tree. The hidden face is a real
+        // element in the DOM (the 3D flip keeps both faces laid out), so without this a screen
+        // reader can reach the chart controls while the current-conditions face is showing, and
+        // vice versa. `inert` is primary -- it removes the subtree from focus and AT as well as
+        // pointer events -- with aria-hidden as the fallback for engines without it.
+        function syncFaceVisibility(card) {
+            const inner = card.querySelector('.card-inner');
+            if (!inner) return;
+            const flipped = inner.classList.contains('flipped');
+            const front = card.querySelector('.card-front');
+            const back = card.querySelector('.card-back');
+            [[front, flipped], [back, !flipped]].forEach(([face, hidden]) => {
+                if (!face) return;
+                if ('inert' in face) face.inert = hidden;
+                else if (hidden) face.setAttribute('inert', '');
+                else face.removeAttribute('inert');
+                if (hidden) face.setAttribute('aria-hidden', 'true');
+                else face.removeAttribute('aria-hidden');
+            });
+        }
+
         function toggleCard(card) {
             const inner = card.querySelector('.card-inner');
             if (!inner) return;
             const flipped = inner.classList.toggle('flipped');
             card.dataset.flipped = flipped ? 'true' : 'false';
-            card.setAttribute('aria-label', flipped
-                ? `${card.dataset.cityName || 'City'} temperature trend. Activate to flip back.`
-                : `${card.dataset.cityName || 'City'} current weather. Activate for the temperature trend.`);
+            syncFaceVisibility(card);
             // The chart is measured/drawn while the back face is hidden, so force a redraw
             refreshChart(card);
         }
@@ -971,15 +1000,17 @@
             // Preserve flip state across re-renders (unit toggle, re-compare)
             const wasFlipped = element.dataset.flipped === 'true';
 
-            // Card element = perspective container; the flip transform lives on .card-inner
+            // Card element = perspective container; the flip transform lives on .card-inner.
+            // Deliberately a plain div with no role and no tabindex: the flip controls are real
+            // buttons inside the faces, so the container must not be announced as a button.
             element.className = `weather-card rounded-2xl drop-shadow-lg cursor-pointer select-none`;
             element.dataset.cityName = data.name;
-            element.setAttribute('role', 'button');
-            element.setAttribute('tabindex', '0');
-            element.setAttribute('aria-label', `${data.name} current weather. Activate for the temperature trend.`);
+            element.removeAttribute('role');
+            element.removeAttribute('tabindex');
+            element.removeAttribute('aria-label');
             element.innerHTML = `
             <div class="card-inner${wasFlipped ? ' flipped' : ''}">
-                <div class="card-face ${bgClass} shadow-lg">
+                <div class="card-face card-front ${bgClass} shadow-lg">
                     <div class="face-body p-3 md:p-6 flex flex-col">
                         <div class="flex flex-col md:flex-row md:justify-between md:items-start mb-4 md:mb-6">
                             <div class="overflow-hidden">
@@ -1025,11 +1056,11 @@
                             <span>${esc(payload.forecastNote)}. Current conditions only.</span>
                         </div>` : ''}
 
-                        <!-- Flip hint -->
-                        <div class="mt-auto pt-3 md:pt-4 md:mt-4 border-t border-white/20 flex items-center justify-center gap-1 text-[10px] md:text-xs font-bold uppercase tracking-wide ${textContrast.subText}">
+                        <!-- Flip control: a real button, so it is reachable and announced correctly -->
+                        <button type="button" class="flip-toggle mt-auto pt-3 md:pt-4 md:mt-4 border-t border-white/20 flex items-center justify-center gap-1 w-full text-[10px] md:text-xs font-bold uppercase tracking-wide ${textContrast.subText}">
                             <i data-lucide="trending-up" class="w-3 h-3 md:w-4 md:h-4"></i>
                             <span>Tap for temperature trend</span>
-                        </div>
+                        </button>
                     </div>
                 </div>
 
@@ -1051,15 +1082,22 @@
                         <span class="text-white/70 text-[10px] font-bold uppercase tracking-wide">Loading trend…</span>
                     </div>
 
-                    <p class="trend-footer flex items-center justify-center gap-1 text-[9px] md:text-[10px] font-bold uppercase tracking-wide text-blue-100/80">
+                    <button type="button" class="flip-toggle trend-footer flex items-center justify-center gap-1 w-full text-[9px] md:text-[10px] font-bold uppercase tracking-wide text-blue-100/80">
                         <i data-lucide="rotate-ccw" class="w-3 h-3"></i>
                         <span>Tap to flip back</span>
-                    </p>
+                    </button>
                 </div>
             </div>
         `;
 
             mountChart(element, hourly, payload.daily || []);
+
+            // Essential, not redundant: renderCard rebuilds innerHTML on every unit toggle and
+            // re-compare, while the template preserves .flipped. A freshly written face has no
+            // inert/aria-hidden on it, so without this call the hidden face silently returns to
+            // the accessibility tree after any unit change. Do not delete it as a duplicate of
+            // the call in toggleCard -- they cover different paths.
+            syncFaceVisibility(element);
         }
         function showError(msg) { errorMsg.textContent = msg; errorMsg.classList.remove('hidden'); const form = document.querySelector('.bg-white.rounded-2xl'); form.animate([{ transform: 'translateX(0)' }, { transform: 'translateX(-5px)' }, { transform: 'translateX(5px)' }, { transform: 'translateX(0)' }], { duration: 300 }); }
         function hideError() { errorMsg.classList.add('hidden'); }
