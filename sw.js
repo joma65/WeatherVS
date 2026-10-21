@@ -11,6 +11,26 @@ const ASSETS_TO_CACHE = [
 'https://unpkg.com/lucide@latest'
 ];
 
+// Cache matching for static assets. A query string on a static asset does not change which
+// asset is meant, so matching on path alone avoids a pointless cache miss.
+//
+// Deliberately NOT used for API requests -- see isApiRequest() below. The weather API's
+// query string (city, appid, units) IS the request's meaning; ignoring it would serve one
+// city's weather for another.
+const MATCH_OPTIONS = { ignoreSearch: true };
+
+// The weather API is never cached or intercepted by this worker. Runtime caching of API
+// responses is new product behaviour, deferred to the P5 offline-UX decision, and is not
+// part of this change. Requests that reach it fall through to the network untouched.
+const API_ORIGIN = 'api.openweathermap.org';
+function isApiRequest(request) {
+  try {
+    return new URL(request.url).hostname === API_ORIGIN;
+  } catch (error) {
+    return false;
+  }
+}
+
 // A response is worth storing if it succeeded. Cross-origin <script> tags are requested in
 // no-cors mode and come back "opaque" with status 0, so response.ok alone would skip the
 // CDN entries entirely.
@@ -63,7 +83,7 @@ async function networkFirst(request) {
     }
     return response;
   } catch (error) {
-    const cached = await cache.match(request);
+    const cached = await cache.match(request, MATCH_OPTIONS);
     if (cached) return cached;
     // A navigation URL may not match the precached shell exactly; fall back to it.
     const shell = (await cache.match('./index.html')) || (await cache.match('./'));
@@ -76,7 +96,7 @@ async function networkFirst(request) {
 // Used for static assets so repeat visits are fast without pinning them to old bytes.
 async function staleWhileRevalidate(request) {
   const cache = await caches.open(CACHE_NAME);
-  const cached = await cache.match(request);
+  const cached = await cache.match(request, MATCH_OPTIONS);
   const network = fetch(request)
     .then((response) => {
       if (isCacheable(response)) {
@@ -91,6 +111,17 @@ async function staleWhileRevalidate(request) {
 // Fetch Event: pick a strategy per request.
 self.addEventListener('fetch', (event) => {
   const request = event.request;
+
+  // Only GET is cacheable. Cache.put() rejects non-GET requests outright, and a non-GET
+  // request is a state change that must go straight to the network.
+  if (request.method !== 'GET') {
+    return;
+  }
+
+  // Never intercept the weather API. Not cached, not matched, not rewritten.
+  if (isApiRequest(request)) {
+    return;
+  }
 
   // Navigations are the app itself: prefer fresh bytes.
   if (request.mode === 'navigate') {
