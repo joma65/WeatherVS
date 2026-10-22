@@ -1,16 +1,26 @@
-// v23: One Call now has a fallback. A key that One Call refuses with 401/403 (the usual sign
-// that it is not subscribed, or not yet active) drops to the free 2.5 pair -- /weather plus the
-// 3-hourly /forecast -- instead of failing the comparison. Both sources normalise to the same
-// record, so the card and the chart cannot tell them apart except where the note says so. The
-// rejection is remembered per key, with a Retry affordance, because "not entitled" is often just
-// "not activated yet". index.html changed, so the cache moves.
+// v25: the window-edge sample is geometry only. It used to be an ordinary point flagged
+// `interpolated`, so the hourly view drew seven dots and seven value labels but only six clock
+// labels -- the seventh tick had no icon to sit above, and the label it would have carried
+// just repeats the hour of the reading before it. It now stretches the line and the band to
+// the six-hour mark and gets no dot, value label, tick or icon, so dots, labels and icons are
+// one-per-reading by construction. formatHourLabel also prints minutes when the city's UTC
+// offset is not a whole hour (Newfoundland is -2:30 in summer), where "8 AM" was labelling an
+// 8:30 sample. index.html changed, so the cache moves.
+//
+// v24: x-axis ticks are anchored to the data points instead of an independent hourly grid.
+// Generating them from `t0 + n * 3600` put every label a few pixels away from the icon beneath
+// it and put the right-most tick on a sample that carries no condition.
+//
+// v23: One Call gained a fallback. A key One Call refuses with 401/403 drops to the free 2.5
+// pair -- /weather plus 3-hourly /forecast -- instead of failing the comparison. Both sources
+// normalise to one record; the downgrade is announced on the card with a Retry action and
+// remembered per key so it is not re-probed every comparison.
 //
 // v22: expected weather per hour. One Call's hourly entries carry a weather[] array, which
 // buildHourlyTemps was dropping. Each hourly point now carries its condition id, so the chart's
 // existing icon row renders in the hourly view as well as the daily one. The icon row is thinned
 // by pixel spacing, because four daily points always fit but seven hourly ones do not on a
-// narrow card. The horizon sample deliberately carries no condition: temperature interpolates,
-// a weather condition does not.
+// narrow card.
 //
 // v21: data source moved from the free 3-hourly /data/2.5/forecast endpoint to One Call 3.0.
 // The hourly view became real hourly readings instead of interpolation between 3-hourly
@@ -78,7 +88,7 @@
 // network-first navigations from stale-while-revalidate assets (#2); v8 replaced
 // cache.addAll() with per-asset add (#1a). v7 and older served everything cache-first and
 // aborted install on any failed asset.
-const CACHE_NAME = 'weather-compare-v23';
+const CACHE_NAME = 'weather-compare-v25';
 const ASSETS_TO_CACHE = [
   './',
 './index.html',
