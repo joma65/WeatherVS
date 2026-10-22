@@ -1,10 +1,30 @@
+// v23: One Call now has a fallback. A key that One Call refuses with 401/403 (the usual sign
+// that it is not subscribed, or not yet active) drops to the free 2.5 pair -- /weather plus the
+// 3-hourly /forecast -- instead of failing the comparison. Both sources normalise to the same
+// record, so the card and the chart cannot tell them apart except where the note says so. The
+// rejection is remembered per key, with a Retry affordance, because "not entitled" is often just
+// "not activated yet". index.html changed, so the cache moves.
+//
+// v22: expected weather per hour. One Call's hourly entries carry a weather[] array, which
+// buildHourlyTemps was dropping. Each hourly point now carries its condition id, so the chart's
+// existing icon row renders in the hourly view as well as the daily one. The icon row is thinned
+// by pixel spacing, because four daily points always fit but seven hourly ones do not on a
+// narrow card. The horizon sample deliberately carries no condition: temperature interpolates,
+// a weather condition does not.
+//
+// v21: data source moved from the free 3-hourly /data/2.5/forecast endpoint to One Call 3.0.
+// The hourly view became real hourly readings instead of interpolation between 3-hourly
+// buckets. One Call reports one temp per hour with no min/max, so the hourly view drops the
+// shaded band and draws a single measured line; the band remains in the 3-day view, where the
+// daily block carries a real per-day envelope. Cities are geocoded first, since One Call is
+// keyed by coordinate.
+//
 // v20: two daily-view defects. The forecast request now asks for the endpoint's maximum of 40
 // buckets (5 days) instead of 24 (72 hours): a late-evening request leaves too few hours for
 // four LOCAL calendar dates, and how many fit depends on the city's UTC offset, so two cities
 // side by side could show a different number of days. The first daily point is also labelled by
-// its actual local date rather than by position -- at night the first bucket with samples is
-// already tomorrow, and it was being called "Rest of today". Local date keys are zero-padded so
-// they still sort across a single-digit month.
+// its actual local date rather than by position. Local date keys are zero-padded so they still
+// sort across a single-digit month.
 //
 // v19: the trend lines are drawn as monotone cubic splines instead of straight segments.
 // Fritsch-Carlson tangents are used rather than Catmull-Rom or a natural cubic, because both
@@ -58,7 +78,7 @@
 // network-first navigations from stale-while-revalidate assets (#2); v8 replaced
 // cache.addAll() with per-asset add (#1a). v7 and older served everything cache-first and
 // aborted install on any failed asset.
-const CACHE_NAME = 'weather-compare-v20';
+const CACHE_NAME = 'weather-compare-v23';
 const ASSETS_TO_CACHE = [
   './',
 './index.html',
@@ -80,6 +100,9 @@ const MATCH_OPTIONS = { ignoreSearch: true };
 // The weather API is never cached or intercepted by this worker. Runtime caching of API
 // responses is new product behaviour, deferred to the P5 offline-UX decision, and is not
 // part of this change. Requests that reach it fall through to the network untouched.
+//
+// This matches on hostname, so it already covers every endpoint the app calls -- the One Call
+// API, the geocoder, and both 2.5 fallback routes all live on api.openweathermap.org.
 const API_ORIGIN = 'api.openweathermap.org';
 function isApiRequest(request) {
   try {
