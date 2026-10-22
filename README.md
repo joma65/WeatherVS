@@ -4,20 +4,22 @@ A single-page weather comparison PWA. Enter two cities, hit **Compare Weather**,
 side-by-side current conditions and a short forecast for both — so you can answer
 "is it warmer there than here?" without opening two tabs.
 
-Everything is client-side. There is no build step, no backend, and no bundler: the app is
-static files served as-is.
+Everything is client-side. There is no backend and no bundler: the app is static files served
+as-is. The one build step is optional and offline — the Tailwind stylesheet is compiled ahead of
+time, not at runtime.
 
 ## File inventory
 
 | File | Purpose |
 |---|---|
-| `index.html` | The entire application — markup, styles (Tailwind via CDN), all JavaScript, and the inline SVG trend chart. Single file. |
+| `index.html` | The entire application — markup, inline styles, all JavaScript, and the inline SVG trend chart. |
+| `tailwind.css` | Compiled Tailwind output. Generated; do not edit by hand. |
+| `input.css` | Tailwind entry file (`@tailwind base; @tailwind components; @tailwind utilities;`). Only needed to rebuild `tailwind.css`. |
+| `tailwind.config.js` | Build config: scans `index.html` for class names. Only needed to rebuild. |
 | `manifest.json` | PWA manifest: app name, `start_url`, standalone display, theme/background colors, icon entries. |
-| `sw.js` | Service worker: pre-caches the app shell and CDN assets, serves navigations network-first and static assets stale-while-revalidate, and clears old cache versions on activate. Cache name is versioned (`weather-compare-v26`). |
+| `sw.js` | Service worker: pre-caches the app shell and CDN assets, serves navigations network-first and static assets stale-while-revalidate, and clears old cache versions on activate. Cache name is versioned (`weather-compare-v31`). |
 | `icon.png` | 512x512 app icon, referenced by `manifest.json`. |
 | `icon-192.png` | 192x192 app icon — a downscale of `icon.png`. Chromium's install criteria want both a 192px and a 512px icon. |
-
-No `package.json` — nothing to install.
 
 ## Run it locally
 
@@ -35,13 +37,37 @@ python3 -m http.server 8080
 Then open <http://localhost:8080>. Equivalents: `npx serve .`, `php -S localhost:8080`,
 or any static host.
 
+### Rebuilding the stylesheet
+
+Tailwind is compiled ahead of time and the result is committed, because the Play CDN that used
+to run in the browser is not production-safe: it builds CSS on every page load and warns about
+it in the console.
+
+```bash
+npm i -D tailwindcss@3
+npx tailwindcss -c tailwind.config.js -i ./input.css -o ./tailwind.css --minify
+```
+
+`tailwind.config.js` scans only `index.html`. Every utility the page uses has to appear literally
+in that file — the arbitrary values included (`drop-shadow-[0_0.2px_1.4px_rgba(0,0,0,1)]`,
+`text-[10px]`, `max-w-[80px]`, the `bg-gradient-to-br` pairs). Nothing is assembled at runtime, so
+nothing is missed, but do not generate class names by string concatenation when editing.
+
+### Stylesheet order matters
+
+`<link rel="stylesheet" href="tailwind.css">` must stay **after** the inline `<style>` block in
+`<head>`. The inline block resets `.flip-toggle` (`color`, `font`, `padding`, `border`) and the
+buttons also carry utilities that set those same properties (`text-blue-100`, `pt-3`, `border-t`).
+Equal specificity means source order decides, so the stylesheet has to come last for the
+utilities to win. Reversing them darkens the flip buttons and strips their padding and separator,
+silently.
+
 ### Bumping the cache
 
 If you change `sw.js` or any asset listed in `ASSETS_TO_CACHE` — in practice that means
-`index.html`, since the chart and all app logic live there — bump `CACHE_NAME`, for example
-`v26` to `v27`. Without the bump, returning visitors keep being served the previous shell, and
-accepting the update prompt re-loads bytes that did not change. The current version is
-`weather-compare-v26`.
+`index.html` or `tailwind.css` — bump `CACHE_NAME`, for example `v31` to `v32`. Without the bump,
+returning visitors keep being served the previous shell, and accepting the update prompt re-loads
+bytes that did not change. The current version is `weather-compare-v31`.
 
 ## Updating the app — the worker and the page are a pair
 
@@ -176,33 +202,81 @@ once, not per comparison.
 Each card's back face is a trend chart drawn as an inline SVG (`buildTempChartSVG`). There is no
 chart library and no canvas. The chart has two modes, toggled by the calendar button.
 
-### Hourly view: now to now plus six hours
+### The vertical scale is fixed
 
-The window width is `HOURLY_WINDOW_HOURS` (6). Its points are the observation at "Now" followed
-by each forecast sample inside the window — that is, one dot, one clock label, one value label
-and one condition icon per reading.
+The domain is **0–100 °F**, stated internally in Celsius (`-160/9` to `340/9`) so both units draw
+identical geometry. It is not fitted to the data.
 
-Under One Call the samples are hourly; under the fallback they are 3-hourly, so a six-hour
-window holds at most two of them and the line between them is the interpolation. The subtitle
-always names which it is — "Next 6 hrs · hourly" versus "Next 6 hrs · 3-hourly" — because a
-coarser chart should be attributable to the key, not look like a bug.
+That is the point. A fitted domain made every slope interpretive — four degrees of overnight drift
+filled the plot as dramatically as a thirty-degree front — and, worse for an app built on
+comparison, each card carried its own invisible domain, so the two curves were not measured
+against the same thing.
 
-The line and the shaded band are extended to the six-hour mark by a **tail**: a final sample
-interpolated onto the window edge. It is geometry only — no dot, no value label, no clock label,
-no icon. That is deliberate. A clock label there would just repeat the hour of the reading
-before it (the tail almost always falls inside that same clock hour), a condition there cannot
-be interpolated (there is no such thing as half-cloudy between 4 PM and 5 PM), and a value there
-would be the only number on the chart that no sample backs. Keeping the tail out of the three
-label rows is what makes the dot count, the clock-label count and the icon count agree.
+The band is a **default, not a cage**:
+
+- Readings outside it widen the domain to include them, plus a 5 % margin, so an extreme day is
+  drawn against a larger range rather than clipped off the frame.
+- A series lying **entirely** outside the band is fitted to its own range instead. Holding the
+  band there would squash the whole line into a sliver against one edge, at which point the band
+  is no longer informative.
+
+Because the domain is fixed, the five grid lines now sit at fixed temperatures rather than at
+whatever the data happened to span, so a given height means the same thing on both cards and in
+both modes.
+
+### Temperature references
+
+Two dashed horizontal references are drawn across the plot:
+
+| Reference | `valueC` | Metric | Imperial | Colour |
+|---|---|---|---|---|
+| Freezing | `0` | 0 °C | 32 °F | `#38bdf8` (saturated blue) |
+| Room temperature | `24` | 24 °C | ≈75 °F | `#fb923c` (orange) |
+
+Both are declared in **source Celsius**, next to the domain constants, so they land at the same
+physical height in either unit — `displayTemp` converts them exactly like data. 24 °C is 75.2 °F,
+which is the "75 °F" reference as it rounds on screen; stating it in Celsius keeps one source of
+truth rather than two values that disagree by a fifth of a degree.
+
+They are drawn **after the grid and before the band and curves**. The fill is only 25 % opaque, so
+a dashed reference beneath it still reads, while the data stays the most prominent thing on the
+card. A reference outside the visible domain is **skipped, not clamped** — a line pinned to the
+frame edge would read as an axis rather than as a temperature.
+
+Colours are picked to be distinguishable from the series themselves: the low curve is pale sky
+(`#7dd3fc`) and the high curve is amber (`#fcd34d`), so freezing uses a more saturated blue and
+the room reference uses orange rather than yellow.
+
+### Hourly view: the current hour plus the next six
+
+The window is `HOURLY_WINDOW_HOURS` (6) hours wide and is **anchored to the top of the current
+hour**, not to the exact instant of the request. That anchoring is what makes the chart stable:
+
+- Slot 0 is "Now", slot 6 is the sixth hour ahead. Every slot is a fixed fraction of the width,
+  so nothing moves between refreshes and the clock labels never crowd.
+- Buckets occupy their own slots. Because positions no longer depend on elapsed minutes, a
+  bucket that is five minutes away is drawn one slot out rather than five pixels out.
+- The window advances one hour at a time. At the top of the hour the leftmost forecast bucket
+  drops off and a new one appears on the right — the only movement the chart ever makes.
+- Each point is one dot, one clock label, one value label and one condition icon, so the three
+  rows beneath the plot always count the same. The window-edge `tail`, where one is still
+  needed, is geometry only and appears in none of them.
+
+The observation is plotted at slot 0 with its measured temperature, even though it was taken
+part-way through the hour. Pinning it there is deliberate: anchored to its true offset, it sat a
+few pixels left of the first bucket late in the hour and the line between them went
+near-vertical. That is why every segment now spans at least one slot, and why the older
+"imminent bucket" filters could be deleted rather than tuned — no forecast hour is dropped for
+being too close.
+
+Under One Call the samples are hourly; under the fallback they are 3-hourly, so a six-hour window
+holds at most two of them and the line between them is the interpolation. The subtitle always
+names which it is — "Next 6 hrs · hourly" versus "Next 6 hrs · 3-hourly" — because a coarser
+chart should be attributable to the key, not look like a bug.
 
 Clock labels include minutes when the city's UTC offset is not a whole hour. Newfoundland is
 −2:30 in summer, so its hourly samples land on the half hour, and printing "8 AM" for an 8:30
 reading would simply be wrong.
-
-A sample too close to "now" is dropped from the drawn points. The threshold differs by source
-because the failure differs: five minutes for hourly data, where the only problem is a dot
-landing on top of the observation marker, and ninety minutes for the 3-hourly fallback, where a
-bucket a few pixels from the left edge produces a near-vertical spike.
 
 ### Expected conditions
 
@@ -258,31 +332,36 @@ spline run backwards, which is valid because the tangent calculation is symmetri
 
 These are load-bearing. Simplify them and the picture silently goes wrong.
 
-- Unit changes must not change the picture. Both the plot scale and the label decisions are made
-  in source Celsius. The minimum vertical span is stated as 5 °C in metric and 9 °F in imperial,
-  which is the same span, so toggling units redraws an identical curve at an identical height.
-  A 0.5 degree tolerance applied to converted values previously made the same band print one
-  label in Celsius and two in Fahrenheit.
+- The vertical domain is fixed at 0–100 °F, expressed in source Celsius so both units draw
+  identical geometry. It widens only to include readings outside the band, plus a margin; a
+  series lying entirely outside the band is fitted instead, because the fixed band would crush
+  it. Do not go back to fitting the domain to the data — that is what made small changes look
+  significant and made two side-by-side cards incomparable.
+- Temperature references are declared in source Celsius alongside the domain constants, never in
+  Fahrenheit. They are annotations, not data: they must not influence the domain, and a reference
+  outside it is skipped rather than clamped to the frame.
+- The window is anchored to a clock boundary, never to `now`. Anchoring to `now` made every
+  position a function of elapsed minutes: labels crowded as the hour advanced and the right-hand
+  gap widened until the next hour reset everything. If the window ever needs to slide again, it
+  must slide in whole hours.
+- Every reading owns exactly one slot, and the observation owns slot 0. Dots, clock labels,
+  condition icons and value labels are all derived from the same point list; a point marked
+  `tail` is skipped by all four. Do not reintroduce a sample that is half point and half
+  geometry.
 - Collapse is decided in source units. A point counts as degenerate, and prints one value with
   no low label, only when its high and low are genuinely equal, not when they merely round
   together on screen.
-- Every label row is anchored to the readings. Clock labels, condition icons and dots are all
-  derived from the same point list and all skip the tail, so the three can never disagree about
-  how many hours are being shown. Do not reintroduce a sample that is half point and half
-  geometry.
 - Bottom padding reserves every band that will actually be drawn, and always clears the lowest
-  dot. A dot is drawn around its centre, so a series whose minimum sits on the plot floor — the
-  normal case, since the scale comes from the data's own min and max — needs its radius reserved
-  before the next band begins. That is why the single-line series reserves a dot clearance where
-  a banded series reserves the below-lane label instead: they are alternatives, not allowances
-  to be stacked.
+  dot. A dot is drawn around its centre, so a series that reaches the bottom of the scale needs
+  its radius reserved before the next band begins. That is why a single-line series reserves a
+  dot clearance where a banded series reserves the below-lane label instead: they are
+  alternatives, not allowances to be stacked.
 - A missing sample must never poison the axis. Unusable readings are carried forward from the
   nearest known value so the geometry stays finite; if nothing is usable, the chart says
   "Trend data unavailable" rather than drawing a wrong line.
 - The two sources normalise into one shape at the fetch boundary. Nothing downstream branches on
-  the source; the only places it is visible are the note on the front face, the subtitle, and the
-  resolution-dependent imminent-sample threshold. Keep it that way, or the two builders will
-  drift.
+  the source; the only places it is visible are the note on the front face, the subtitle, and
+  the window anchoring shared by both builders.
 - Value labels live in lanes, and both the value labels and the condition icons thin by pixel
   width rather than by index parity, always keeping the last item so the row is not visibly
   truncated.
@@ -291,26 +370,40 @@ These are load-bearing. Simplify them and the picture silently goes wrong.
   and is then impossible to reproduce.
 - The chart is `role="img"` with a data-carrying label. Thinning labels and icons is a visual
   compromise, so the `aria-label` enumerates each time, rounded value, and expected condition.
+- The compiled stylesheet is linked after the inline `<style>` block. See above.
 
 ## Known issues / backlog
 
 Tracked work lives in the project backlog. This is the state of the rough edges as found.
 
-- The top of the plot has no equivalent clearance. The highest reading's value label is drawn
-  above its dot inside the top padding, which is ample today, but nothing reserves that space
-  explicitly the way the bottom now does.
+- **The temperature references are unlabelled.** Colour and position carry the meaning: blue
+  below is freezing, orange above is comfortable. A sighted user has to know that, and a
+  screen-reader user is not told the references exist at all — the `aria-label` lists readings
+  only. Adding a small edge label per line would fix both, at the cost of collision risk with
+  the value labels that already live near the curve.
+- **A fixed band flattens mild weather, deliberately.** A day that moves between 48 °F and 55 °F
+  now draws a short, low line, because 7 degrees of 100 is 7 % of the plot. That is the trade the
+  fixed scale makes: a small change stays small. If a particular city needs a tighter view, the
+  domain constants are the place to change it, but changing them breaks comparability with the
+  other card.
+- The observation is drawn at slot 0 even when it was measured part-way through the hour, so the
+  first interval represents somewhere between zero and sixty minutes of real time. This is the
+  price of a stable axis; the alternative crowds the label row.
+- The chart is drawn from data fetched at comparison time and never redraws itself, so a tab left
+  open for an hour keeps showing the hour it was loaded in. The window advances only on the next
+  comparison or unit toggle.
+- The top of the plot has no equivalent clearance to the bottom. The highest reading's value
+  label is drawn above its dot inside the top padding, which is ample today, but nothing reserves
+  that space explicitly.
 - The tail is drawn but not described. The accessible name stops at the last reading, so a
-  screen-reader user is not told that the line continues to the six-hour mark.
+  screen-reader user is not told that the line continues to the horizon.
 - The fallback is announced but not explained in place. A user whose key is merely not yet active
   sees an info note and a Retry button; nothing tells them the usual cause is a two-hour
   activation delay unless they read this file.
 - The entitlement probe costs two wasted calls the first time a fallback-only key is used, per
-  city, and both cities may probe because they are fetched concurrently. Recording the rejection
-  before the second request would require serialising the pair, which is worse for the common
-  case.
+  city, and both cities may probe because they are fetched concurrently.
 - One Call returns current conditions and both forecast blocks in one payload, so a hard failure
-  on the primary path costs the whole card. There is no partial degradation within a source —
-  the fallback is all-or-nothing, not per-block.
+  on the primary path costs the whole card. There is no partial degradation within a source.
 - Icon rendering is not failure-tolerant. `lucide.createIcons()` is called unguarded on several
   paths, one of which runs during startup from `updateKeyStatus()`. The update-prompt code uses
   the guarded `if (window.lucide)` form; the other call sites do not, so a blocked or failed CDN
@@ -319,8 +412,7 @@ Tracked work lives in the project backlog. This is the state of the rough edges 
   carries the full condition list, so screen readers are covered, but a sighted user has to
   recognise the glyph. Emoji rendering also varies by platform for the same code point.
 - The hourly view shows 6 of the 48 hours One Call returns. The window is a product decision, not
-  a data limit; widening it is a one-constant change (`HOURLY_WINDOW_HOURS`), though the
-  time-proportional axis starts thinning its clock labels well before 48.
+  a data limit; widening it is a one-constant change (`HOURLY_WINDOW_HOURS`).
 - The app updates only when the user accepts the prompt. A new service worker waits rather than
   activating on its own, so a visitor who never accepts keeps running the version they already
   had. That is intentional, but it does mean updates are not automatic.
@@ -328,22 +420,21 @@ Tracked work lives in the project backlog. This is the state of the rough edges 
   `buildHourlyTempsFromBuckets`, `buildDailyTemps`, `buildDailyTempsFromBuckets`,
   `buildTempChartSVG`, `monotoneTangents`) over plain objects, so a static harness that stubs
   `fetch` with captured One Call **and** 2.5 responses could assert that both paths yield the
-  same record shape, that dots, clock labels and icons each number one per reading, that the
-  spline never leaves its data envelope, and that no element is drawn outside the viewBox.
-  Nothing like that exists yet.
+  same record shape, that dots, clock labels and icons each number one per reading, that slot
+  positions are fixed for a given hour, that the domain is the fixed band unless data escapes it,
+  that a reference outside the domain is omitted rather than clamped, that the spline never
+  leaves its data envelope, and that no element is drawn outside the viewBox. Nothing like that
+  exists yet.
 - Installability is unverified in a real browser. `manifest.json` declares both a 192px and a
-  512px icon, which is what Chromium asks for, but nobody has confirmed in Chrome that the
-  install affordance appears and that DevTools shows the app as installable. Treat install
-  support as unproven until someone does.
+  512px icon, but nobody has confirmed in Chrome that the install affordance appears and that
+  DevTools shows the app as installable.
 - There is no offline fallback page. A navigation that fails with nothing cached re-throws rather
-  than showing a friendly offline view. The shell itself is cached, so a repeat visitor usually
-  gets the app, but a first visit with no network does not.
-- Third-party assets are still third-party. Tailwind (CDN), Lucide, and the weather icons are
-  fetched at runtime, so the app is not fully self-contained offline.
-- The `icon.png` artwork does not respect the maskable safe zone. Content reaches the canvas
-  edge, and roughly 24% of its structured detail falls outside the central 80% circle, so
-  `manifest.json` declares both icons `purpose: "any"` only. A padded maskable variant is
-  outstanding; `icon-192.png` inherits the same limitation.
+  than showing a friendly offline view.
+- Third-party assets are still third-party. Lucide and the weather icons are fetched at runtime,
+  so the app is not fully self-contained offline.
+- The `icon.png` artwork does not respect the maskable safe zone. Roughly 24% of its structured
+  detail falls outside the central 80% circle, so `manifest.json` declares both icons
+  `purpose: "any"` only.
 - API key handling is client-side and plaintext, and the key may back a subscription that has a
   payment method attached. See above.
 
@@ -354,19 +445,24 @@ you bump it, and never reuse a name.
 
 | Version | Change |
 |---|---|
-| `v26` | The plot floor clears the lowest dot. Bottom padding now reserves the dot's radius when a series has no band, where before only the below-lane value label reserved that space — and the hourly One Call view has no band, so the lowest dot printed over the clock label beneath it. |
-| `v25` | The window-edge sample is geometry only — it stretches the line and the band to the six-hour mark with no dot, value label, clock label or icon, so dots, labels and icons are one-per-reading. Clock labels now include minutes for cities whose UTC offset is not a whole hour. |
+| `v31` | Two temperature references on the chart: freezing (0 °C / 32 °F, saturated blue) and room temperature (24 °C / ≈75 °F, orange). Declared in source Celsius like the domain, so they sit at the same height in either unit; drawn under the band, skipped rather than clamped when off-scale. |
+| `v30` | The vertical scale is fixed at 0–100 °F (stated in source Celsius so both units draw identical geometry) instead of fitted to the data. It widens to include readings outside the band plus a margin, and fits a series lying entirely outside it. A fitted domain made small changes look significant and gave each card its own invisible scale, so side-by-side slopes were not comparable. |
+| `v29` | The hourly window is anchored to the top of the current hour and the observation is pinned to slot 0, so positions are fixed for the whole hour: no label drift, no crowding, no lost hour. The imminent-bucket filters are gone, because slot spacing prevents the spike they existed to hide. |
+| `v28` | The compiled `tailwind.css` is precached and linked **after** the inline `<style>` block. Loading it earlier let the `.flip-toggle` reset win on equal specificity, darkening the flip buttons and stripping their padding and separator. |
+| `v27` | `tailwind.css` added to the shell; the Play CDN script removed. It is not production-safe and warns on every load. Superseded by v28, which fixed the stylesheet's position. |
+| `v26` | The plot floor clears the lowest dot. Bottom padding reserves the dot's radius when a series has no band, where before only the below-lane value label did — and the hourly One Call view has no band, so the lowest dot printed over the clock label. |
+| `v25` | The window-edge sample is geometry only: no dot, value label, clock label or icon, so dots, labels and icons are one-per-reading. Clock labels print minutes for zones whose UTC offset is not a whole hour. |
 | `v24` | X-axis ticks anchored to the data points instead of an independent hourly grid, so a label and its icon are the same point. |
-| `v23` | One Call gained a fallback. A key One Call refuses with 401/403 drops to the free 2.5 pair — `/weather` plus 3-hourly `/forecast` — instead of failing the comparison. Both sources normalise to one record; the downgrade is announced on the card with a Retry action and remembered per key so it is not re-probed every comparison. |
+| `v23` | One Call gained a fallback. A key One Call refuses with 401/403 drops to the free 2.5 pair — `/weather` plus 3-hourly `/forecast` — instead of failing the comparison. Both sources normalise to one record; the downgrade is announced on the card with a Retry action and remembered per key. |
 | `v22` | Expected weather per hour. Hourly points now carry their condition id, so the icon row renders in both views; it thins by pixel spacing because seven hourly icons do not fit where four daily ones did. |
 | `v21` | Data source moved to One Call 3.0. Hourly view is real hourly readings; the shaded band is now daily-view only, because the hourly block carries no min/max. Cities are geocoded first, since One Call is keyed by coordinate. |
-| `v20` | Daily view: forecast request raised to the endpoint maximum so four local calendar dates are available at any hour in any timezone, and the first point is labelled by its real local date instead of by position. Local date keys zero-padded so they sort across a single-digit month. |
+| `v20` | Daily view: forecast request raised to the endpoint maximum so four local calendar dates are available in any timezone, and the first point is labelled by its real local date instead of by position. Local date keys zero-padded so they sort across a single-digit month. |
 | `v19` | Trend lines drawn as monotone cubic splines with Fritsch-Carlson tangents, so peaks and troughs cannot overshoot the measured values. Dots and labels stay on the real data points. |
-| `v18` | A leading forecast bucket under 90 minutes away is no longer plotted, removing the near-vertical spike at the left edge. It still feeds interpolation. |
-| `v17` | Chart: the observation band collapsed back onto the current reading, so the shaded region starts from a single point at "Now". Bottom padding reserves the below-lane label height on top of the tick row, so the right-most low label clears the hour mark. |
+| `v18` | A leading forecast bucket under 90 minutes away is no longer plotted, removing the near-vertical spike at the left edge. Obsolete as of v29. |
+| `v17` | Chart: the observation band collapsed back onto the current reading, so the shaded region starts from a single point at "Now". Bottom padding reserves the below-lane label height on top of the tick row. |
 | `v16` | Chart: attempt at an extrapolated band at the observation plus a reserved below-lane offset. Superseded by v17; the borrowed envelope drew a flat left segment that kinked at the first bucket. |
-| `v15` | Chart: collapse detection and minimum plot span computed in source Celsius, so unit toggles no longer change labels or plot height. Interpolated points print a full H/L pair. |
-| `v14` | Fixed the hourly chart rendering nothing. An interpolation helper read fields off numbers and returned undefined, making the chart domain NaN and mapping every point outside the viewBox. |
+| `v15` | Chart: collapse detection and plot span computed in source Celsius, so unit toggles no longer change labels or plot height. |
+| `v14` | Fixed the hourly chart rendering nothing. An interpolation helper read fields off numbers and returned undefined, making the chart domain NaN. |
 | `v13` | Hourly trend rebuilt around real forecast timestamps: time-proportional axis, real buckets, one interpolated closing sample, instead of seven synthetic hourly points whose labels were suppressed. |
 | `v12` | Lucide pinned to an exact version and a full file path. The short package URL still answers with a redirect, and the Cache API treats a redirected response as a failed request, so only the deep `/dist/umd/lucide.min.js` path returns a clean 200. |
 | `v11` | Added `icon-192.png`. |
