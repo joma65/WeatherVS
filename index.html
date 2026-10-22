@@ -162,7 +162,8 @@
                     Configure API Key
                 </h2>
                 <p class="text-sm text-slate-600 mb-4">
-                    This tool uses the OpenWeatherMap API. Your key is stored locally in your browser.
+                    This tool uses the OpenWeatherMap API. A key with One Call 3.0 access gets hourly
+                    forecasts; a plain free key falls back to the 3-hourly forecast automatically.
                 </p>
                 <div class="mb-4 flex items-start gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg">
                     <span aria-hidden="true" class="shrink-0 text-amber-600">⚠</span>
@@ -369,6 +370,7 @@
         // and saving could never delete a stored key -- there was no way to remove one at all.
         removeKeyBtn.addEventListener('click', () => {
             apiKey = '';
+            oneCallRejectedKey = null;
             localStorage.removeItem('weather_api_key');
             apiKeyInput.value = '';
             updateKeyStatus();
@@ -379,7 +381,17 @@
 
         saveKeyBtn.addEventListener('click', () => {
             const key = apiKeyInput.value.trim();
-            if (key) { apiKey = key; localStorage.setItem('weather_api_key', apiKey); updateKeyStatus(); apiModal.classList.add('hidden'); if(city1Input.value && city2Input.value) compareWeather(); }
+            if (key) {
+                // A different key may well have One Call access, so the recorded rejection must
+                // not survive the swap -- otherwise a newly subscribed key stays on the fallback
+                // until the page is reloaded.
+                if (key !== apiKey) oneCallRejectedKey = null;
+                apiKey = key;
+                localStorage.setItem('weather_api_key', apiKey);
+                updateKeyStatus();
+                apiModal.classList.add('hidden');
+                if(city1Input.value && city2Input.value) compareWeather();
+            }
             else { showError('Enter a key to save, or use "Remove key" to clear the saved one.'); }
         });
         unitToggleBtn.addEventListener('click', () => {
@@ -394,8 +406,11 @@
         // --- Card Flip (event delegation so it survives innerHTML re-renders) ---
         // The flip controls are real <button>s, so Enter/Space produce a click natively and the
         // old keydown handler for the focusable container is gone with the role/tabindex.
+        // Interactive controls inside the front face opt out here, or they would flip the card
+        // as a side effect of being clicked.
         resultsArea.addEventListener('click', (e) => {
-            if (e.target.closest('.trend-toggle')) return; // handled separately
+            if (e.target.closest('.trend-toggle')) return;   // handled separately
+            if (e.target.closest('.retry-onecall')) return;  // handled separately
             const card = e.target.closest('.weather-card');
             if (card) toggleCard(card);
         });
@@ -408,6 +423,17 @@
             const card = btn.closest('.weather-card');
             if (!card) return;
             toggleChartMode(card);
+        });
+
+        // Retry the One Call probe. Clears the remembered rejection and re-runs the comparison,
+        // which is the only way back to hourly data without a reload once a key has been
+        // downgraded -- typically because the key had not finished activating.
+        resultsArea.addEventListener('click', (e) => {
+            const btn = e.target.closest('.retry-onecall');
+            if (!btn) return;
+            e.stopPropagation();
+            oneCallRejectedKey = null;
+            compareWeather();
         });
 
         // Only the visible face may be in the accessibility tree. The hidden face is a real
@@ -441,15 +467,24 @@
             refreshChart(card);
         }
 
+        // The subtitle names the resolution, and the resolution depends on which source answered:
+        // hourly for One Call, 3-hourly (interpolated) for the free fallback. Hard-coding either
+        // one would make the label lie for half of the possible keys.
+        function trendSubtitle(mode, source) {
+            const unit = tempUnitSuffix();
+            if (mode === '3day') return `Next 3 days · ${unit}`;
+            return source === 'legacy'
+                ? `Next 6 hrs · 3-hourly · ${unit}`
+                : `Next 6 hrs · hourly · ${unit}`;
+        }
+
         function toggleChartMode(card) {
             const state = chartState.get(card);
             if (!state) return;
             state.mode = state.mode === '3day' ? 'hourly' : '3day';
             state.lastW = 0; state.lastH = 0; // force redraw
-            // Update subtitle label
             const subtitle = card.querySelector('.trend-subtitle');
-            if (subtitle) subtitle.textContent = state.mode === '3day' ? `Next 3 days · ${tempUnitSuffix()}` : `Next 6 hrs · 3-hourly · ${tempUnitSuffix()}`;
-            // Update toggle button label
+            if (subtitle) subtitle.textContent = trendSubtitle(state.mode, state.source);
             const btnLabel = card.querySelector('.trend-toggle-label');
             if (btnLabel) btnLabel.textContent = state.mode === '3day' ? '6 hrs' : '3 day';
             state.draw();
@@ -498,6 +533,36 @@
             } catch (err) { loadingState.classList.add('hidden'); showError(err.message); }
         }
 
+        // --- OpenWeatherMap access: primary and fallback ---
+        // Primary is One Call 3.0: true hourly readings for 48 h plus a per-day envelope for 8
+        // days. Fallback is the free 2.5 pair (/weather + 3-hourly /forecast), which any key can
+        // reach. The fallback exists because One Call is a separate subscription that a plain
+        // free key does not include, and "your key is free-tier" should not mean "the app is
+        // broken" -- it should mean "coarser forecast, and the card says so".
+        //
+        // One Call is keyed by coordinate, not by city name, so the primary path geocodes first.
+        // The fallback takes a city name directly, so it never pays for that extra request.
+        const GEO_URL = 'https://api.openweathermap.org/geo/1.0/direct';
+        const ONE_CALL_URL = 'https://api.openweathermap.org/data/3.0/onecall';
+        const CURRENT_URL = 'https://api.openweathermap.org/data/2.5/weather';
+        const FORECAST_URL = 'https://api.openweathermap.org/data/2.5/forecast';
+
+        // 2.5 forecast buckets, 3 h each -> the endpoint's maximum, 5 days. Enough to always
+        // produce four local calendar dates regardless of the city's UTC offset.
+        const FORECAST_BUCKETS = 40;
+
+        // The key One Call has refused, remembered for the session so that every comparison does
+        // not pay for a request already known to fail. Cleared when the key changes or the user
+        // retries, because a key that was merely not yet active will start working.
+        let oneCallRejectedKey = null;
+
+        // Thrown only when One Call answers 401/403: the key authenticated but is not entitled.
+        // Anything else -- network, timeout, rate limit, malformed body -- is a real failure and
+        // must not be silently downgraded to the fallback, which would hide it.
+        class OneCallUnavailable extends Error {
+            constructor(message) { super(message); this.name = 'OneCallUnavailable'; }
+        }
+
         // Every request gets a hard deadline. A hung request must not strand the spinner:
         // AbortController fires, the fetch rejects, and the caller renders an error state.
         const REQUEST_TIMEOUT_MS = 10000;
@@ -515,191 +580,225 @@
             }
         }
 
-        // The forecast endpoint's maximum. Each entry is 3 hours, so this is 5 days.
+        // One place for the HTTP-level failure messages, so the endpoints cannot drift into
+        // reporting the same status differently. `subject` is interpolated into the text and is
+        // always a value this file produced (a quoted city name or a literal), never API prose.
         //
-        // This used to be 24 (72 hours), which is not enough to guarantee four daily buckets.
-        // A late-evening request has already burned part of today, and how many LOCAL calendar
-        // dates fit in the remaining window depends on the city's UTC offset -- two cities
-        // compared side by side could therefore show a different number of days, which reads as
-        // missing data rather than as a windowing artefact. Requesting the full 120 hours makes
-        // four dates available in every timezone at any hour.
-        const FORECAST_BUCKETS = 40;
+        // The status is attached to the thrown error rather than flattened into its text, because
+        // the caller needs to tell "not entitled to One Call" (fall back) apart from "this
+        // request failed" (do not).
+        async function fetchJson(url, subject) {
+            let res;
+            try {
+                res = await fetchWithTimeout(url);
+            } catch (err) {
+                throw new Error(`Could not reach OpenWeatherMap for ${subject}. ${err.message}`);
+            }
+            if (!res.ok) {
+                const err = new Error(
+                    res.status === 401 ? 'Invalid API Key.' :
+                    res.status === 429 ? 'OpenWeatherMap rate limit reached — wait a minute and try again.' :
+                    `OpenWeatherMap returned ${res.status} for ${subject}.`
+                );
+                err.status = res.status;
+                throw err;
+            }
+            try {
+                return await res.json();
+            } catch (err) {
+                throw new Error(`Could not read the OpenWeatherMap response for ${subject}.`);
+            }
+        }
 
-        async function fetchWeather(city) {
-            // The key is user-supplied and may contain characters that are unsafe in a query
-            // string, so it is encoded like any other untrusted value. This does not hide the
-            // key -- it still travels in the URL and appears in server logs and browser history;
-            // that is what the plaintext-storage warning in the key modal is about.
+        // The key is user-supplied and may contain characters that are unsafe in a query string,
+        // so it is encoded like any other untrusted value. This does not hide the key -- it still
+        // travels in the URL and appears in server logs and browser history; that is what the
+        // plaintext-storage warning in the key modal is about.
+        async function geocodeCity(city) {
+            const url = `${GEO_URL}?q=${encodeURIComponent(city)}&limit=1&appid=${encodeURIComponent(apiKey)}`;
+            const places = await fetchJson(url, `City "${city}"`);
+
+            // The geocoder answers 200 with an empty array for an unknown name; there is no 404.
+            if (!Array.isArray(places) || !places.length) throw new Error(`City "${city}" not found.`);
+            const place = places[0];
+            if (typeof place.lat !== 'number' || typeof place.lon !== 'number') {
+                throw new Error(`OpenWeatherMap returned no coordinates for "${city}".`);
+            }
+            return {
+                name: place.name || city,
+                country: place.country || '',
+                lat: place.lat,
+                lon: place.lon
+            };
+        }
+
+        // --- Primary: One Call 3.0 ---
+        async function fetchFromOneCall(city) {
+            const place = await geocodeCity(city);
+
+            // minutely and alerts are not used by anything here, and excluding them keeps the
+            // payload down. hourly and daily are exactly what the two chart modes read.
+            const url = `${ONE_CALL_URL}?lat=${place.lat.toFixed(4)}&lon=${place.lon.toFixed(4)}`
+                + `&units=metric&exclude=minutely,alerts&appid=${encodeURIComponent(apiKey)}`;
+
+            let data;
+            try {
+                data = await fetchJson(url, `Forecast for ${place.name}`);
+            } catch (err) {
+                // Only an entitlement failure gets downgraded. Note that a geocode rejection
+                // above is deliberately NOT caught here: if the key cannot even geocode, it is
+                // broken, and the free endpoints would reject it too -- falling back would just
+                // burn two more calls to reach the same error.
+                if (err.status === 401 || err.status === 403) throw new OneCallUnavailable(err.message);
+                throw err;
+            }
+
+            if (!data || !data.current || typeof data.current.temp !== 'number') {
+                throw new Error(`OpenWeatherMap returned no current conditions for ${place.name}.`);
+            }
+
+            const tz = typeof data.timezone_offset === 'number' ? data.timezone_offset : 0;
+            const c = data.current;
+
+            // One Call's `current` block is flat (temp, humidity, wind_speed at the top level)
+            // while renderCard was written against the 2.5 `/weather` shape (main.temp,
+            // main.humidity, wind.speed, sys.sunrise). Normalise once, here, into that same shape
+            // so every consumer downstream needs no changes at all -- and so the fallback path,
+            // which already produces the 2.5 shape, needs no translation in the other direction.
+            const current = {
+                name: place.name,
+                timezone: tz,
+                sys: { country: place.country, sunrise: c.sunrise, sunset: c.sunset },
+                main: { temp: c.temp, feels_like: c.feels_like, humidity: c.humidity },
+                wind: { speed: c.wind_speed },
+                weather: Array.isArray(c.weather) ? c.weather : []
+            };
+
+            const hourlyList = Array.isArray(data.hourly) ? data.hourly : [];
+            const dailyList = Array.isArray(data.daily) ? data.daily : [];
+
+            let note = null;
+            if (!hourlyList.length) note = { tone: 'warn', text: 'Forecast unavailable — no hourly data returned' };
+
+            return {
+                current,
+                hourly: buildHourlyTemps(current, hourlyList),
+                daily: buildDailyTemps(current, dailyList),
+                note,
+                source: 'onecall'
+            };
+        }
+
+        // --- Fallback: the free 2.5 pair ---
+        // Same normalised record shape as the primary path, so renderCard and the chart cannot
+        // tell which source produced what except where the note says so.
+        async function fetchFromLegacy(city) {
             const query = `q=${encodeURIComponent(city)}&appid=${encodeURIComponent(apiKey)}&units=metric`;
-            const currentUrl = `https://api.openweathermap.org/data/2.5/weather?${query}`;
-            const forecastUrl = `https://api.openweathermap.org/data/2.5/forecast?${query}&cnt=${FORECAST_BUCKETS}`;
+            const currentUrl = `${CURRENT_URL}?${query}`;
+            const forecastUrl = `${FORECAST_URL}?${query}&cnt=${FORECAST_BUCKETS}`;
+
             let currentRes, forecastRes;
             try {
-                // The forecast is optional: if it fails or times out we degrade to a
-                // current-conditions card rather than failing the whole comparison.
+                // The forecast stays optional here, exactly as before: if it fails or times out
+                // we degrade to a current-conditions card rather than failing the comparison.
                 const forecastPromise = fetchWithTimeout(forecastUrl).catch(err => ({ ok: false, error: err }));
                 [currentRes, forecastRes] = await Promise.all([fetchWithTimeout(currentUrl), forecastPromise]);
             } catch (err) {
-                throw new Error(`Could not reach OpenWeatherMap for ${city}. ${err.message}`);
+                throw new Error(`Could not reach OpenWeatherMap for "${city}". ${err.message}`);
             }
+
             if (!currentRes.ok) {
                 if (currentRes.status === 401) throw new Error('Invalid API Key.');
                 if (currentRes.status === 404) throw new Error(`City "${city}" not found.`);
-                throw new Error(`Error fetching data for ${city}`);
+                if (currentRes.status === 429) throw new Error('OpenWeatherMap rate limit reached — wait a minute and try again.');
+                throw new Error(`OpenWeatherMap returned ${currentRes.status} for "${city}".`);
             }
-            const current = await currentRes.json();
 
-            // A forecast failure must not be silent: record WHY it is missing so the card can
-            // say so, and keep it distinct from a total request failure (which throws above).
-            let forecastNote = null;
+            let current;
+            try {
+                current = await currentRes.json();
+            } catch (err) {
+                throw new Error(`Could not read the OpenWeatherMap response for "${city}".`);
+            }
+
             let forecastList = [];
+            let note = null;
+
             if (!forecastRes.ok) {
                 if (forecastRes.error) {
-                    forecastNote = `Forecast unavailable — ${forecastRes.error.message}`;
+                    note = { tone: 'warn', text: `Forecast unavailable — ${forecastRes.error.message}` };
                 } else if (forecastRes.status === 401) {
-                    forecastNote = 'Forecast unavailable — API key rejected';
+                    note = { tone: 'warn', text: 'Forecast unavailable — API key rejected' };
                 } else {
-                    forecastNote = `Forecast unavailable — server returned ${forecastRes.status}`;
+                    note = { tone: 'warn', text: `Forecast unavailable — server returned ${forecastRes.status}` };
                 }
             } else {
                 try {
                     const forecastJson = await forecastRes.json();
                     forecastList = Array.isArray(forecastJson.list) ? forecastJson.list : [];
-                    if (!forecastList.length) forecastNote = 'Forecast unavailable — no data returned';
-                } catch (e) {
-                    forecastNote = 'Forecast unavailable — response could not be read';
+                    if (!forecastList.length) note = { tone: 'warn', text: 'Forecast unavailable — no data returned' };
+                } catch (err) {
+                    note = { tone: 'warn', text: 'Forecast unavailable — response could not be read' };
                 }
             }
 
-            // With no forecast there is no trend to draw. buildHourlyTemps() returns [] in that
-            // case, and the chart says "Trend data unavailable" instead of drawing a flat line
-            // that implies six hours of data we do not have.
-            const hourly = buildHourlyTemps(current, { list: forecastList });
-            const daily = buildDailyTemps(current, forecastList);
-            return { current, hourly, daily, forecastNote };
+            // The downgrade is announced, not hidden: the hourly view is coarser here and the
+            // chart draws a band instead of a single line, so the difference should be
+            // attributable to the key rather than looking like a bug. A real forecast failure
+            // outranks it -- that is the more urgent thing to say, and there is one note slot.
+            if (!note) {
+                note = { tone: 'info', text: 'Free 3-hourly forecast — this key has no One Call access yet.' };
+            }
+
+            return {
+                current,
+                hourly: buildHourlyTempsFromBuckets(current, forecastList),
+                daily: buildDailyTempsFromBuckets(current, forecastList),
+                note,
+                source: 'legacy'
+            };
         }
 
-        // --- Hourly trend data: "now" -> now + HOURLY_WINDOW_HOURS ---
-        // The OpenWeatherMap forecast endpoint is 3-hourly, so a 6 h window holds at most two
-        // real buckets. Materialising 7 hourly points was both a fiction (six of them were
-        // interpolated) and the cause of the missing value labels: each synthesized hour was
-        // matched against `bucket.dt` by exact equality, never matched the 3-hourly UTC grid,
-        // and was then flagged `interpolated`, which suppressed the labels entirely.
-        //
-        // A straight segment between two real buckets already IS the linear interpolation, so
-        // hourly samples are not turned into points at all. Points are: the observation, every
-        // real bucket inside the window, and one closing sample on the window edge. Only the
-        // closing sample is derived, and the chart marks it with a hollow dot so the shape can
-        // stay honest about which readings were measured and which were interpolated.
+        // Try One Call unless this exact key has already been refused. Both cities are fetched
+        // concurrently, so on the very first comparison both may still probe before either
+        // records the rejection; that costs one extra pair of calls, once, and is preferable to
+        // serialising the two requests to avoid it.
+        async function fetchWeather(city) {
+            if (apiKey !== oneCallRejectedKey) {
+                try {
+                    return await fetchFromOneCall(city);
+                } catch (err) {
+                    if (!(err instanceof OneCallUnavailable)) throw err;
+                    oneCallRejectedKey = apiKey;
+                }
+            }
+            return fetchFromLegacy(city);
+        }
+
+        // One Call and the 2.5 endpoints both report the condition as an array of short objects.
+        // Only the first entry is used -- neither API sends more than one -- and only two fields
+        // are kept: the numeric id drives the emoji, `main` lets the chart's accessible label name
+        // the condition in words.
+        function conditionOf(entry) {
+            const w = (entry && Array.isArray(entry.weather) && entry.weather[0]) ? entry.weather[0] : null;
+            return {
+                condId: (w && typeof w.id === 'number') ? w.id : null,
+                condMain: (w && typeof w.main === 'string') ? w.main : ''
+            };
+        }
+
+        // --- Trend windows and thresholds ---
         const HOURLY_WINDOW_HOURS = 6;
 
-        // A bucket that lands almost immediately after "now" is drawn only a few pixels from the
-        // left edge, so the segment rising out of the observation is near-vertical: a spike, not
-        // a trend. When the next bucket is this close it is kept for interpolation but is NOT
-        // plotted -- the visible line runs from the observation straight to the bucket after it,
-        // which is the same slope the two buckets describe, drawn once instead of twice.
-        // 90 minutes is half a 3-hourly bucket. The number is in seconds to match the API.
+        // A sample this close to "now" would be drawn on top of the observation dot. One Call's
+        // hourly grid is fine enough that a nearby reading differs by very little, so the only
+        // problem is a cluttered dot.
+        const IMMINENT_HOURLY_SECONDS = 20 * 60;
+
+        // The 3-hourly fallback is a coarser grid: a bucket a few minutes out is drawn a few
+        // pixels from the left edge, and the segment rising out of the observation becomes a
+        // near-vertical spike rather than a trend. Half a bucket is the threshold.
         const IMMINENT_BUCKET_SECONDS = 90 * 60;
-
-        function buildHourlyTemps(current, forecast) {
-            const now = Math.floor(Date.now() / 1000);
-            const t0 = now;
-            const t1 = now + HOURLY_WINDOW_HOURS * 3600;
-
-            const samples = ((forecast && forecast.list) || [])
-                .filter(item => item && typeof item.dt === 'number' && item.main && typeof item.main.temp === 'number')
-                .map(item => ({
-                    dt: item.dt,
-                    tempC: item.main.temp,
-                    highC: item.main.temp_max ?? item.main.temp,
-                    lowC: item.main.temp_min ?? item.main.temp
-                }))
-                .sort((a, b) => a.dt - b.dt);
-
-            // No usable forecast samples => no trend. Returning [] lets the chart say so rather
-            // than drawing a flat line that implies six hours of data we do not have.
-            if (!samples.length) return [];
-
-            // Piecewise-linear lookup over the real samples. It reads a NAMED FIELD off the
-            // sample objects: an earlier version mapped a value-only selector into this
-            // function and then read .dt/.v off the resulting numbers, so every comparison
-            // against undefined failed, the closing sample came back undefined, and the whole
-            // plot collapsed outside the viewBox. Keep the {dt, <field>} shape intact.
-            const interpolateAt = (field, t) => {
-                const first = samples[0];
-                if (t <= first.dt) return first[field];
-                const last = samples[samples.length - 1];
-                if (t >= last.dt) return last[field];
-                for (let i = 1; i < samples.length; i++) {
-                    const prev = samples[i - 1], next = samples[i];
-                    if (t <= next.dt) {
-                        const gap = next.dt - prev.dt;
-                        if (gap <= 0) return next[field];
-                        return prev[field] + ((t - prev.dt) / gap) * (next[field] - prev[field]);
-                    }
-                }
-                return last[field];
-            };
-
-            const nowTempC = typeof current?.main?.temp === 'number' ? current.main.temp : samples[0].tempC;
-            const tz = current?.timezone;
-
-            const inWindow = samples.filter(b => b.dt > t0 && b.dt <= t1);
-
-            // Drop an imminent leading bucket from the PLOTTED set only. It stays in `samples`,
-            // so it still shapes the interpolated closing sample on the right edge. The guard on
-            // length keeps at least one real bucket to aim at: if the imminent bucket is the only
-            // one in the window there is nothing smoother to draw, so the spike is the honest
-            // picture and it is left alone rather than being replaced by a lone observation.
-            const dropLeading = inWindow.length > 1 && (inWindow[0].dt - t0) < IMMINENT_BUCKET_SECONDS;
-            const plotSamples = dropLeading ? inWindow.slice(1) : inWindow;
-
-            // "Now" is a single reading, not a window: the 2.5 /weather endpoint reports one
-            // temperature and no meaningful spread. The band therefore starts collapsed on that
-            // reading and fans out to the first forecast window. Giving it a borrowed envelope
-            // instead drew a flat segment across the left edge that then kinked at the first
-            // bucket -- so it starts on itself, which is what the left-hand point means.
-            const points = [{
-                dt: t0,
-                tempC: nowTempC,
-                highC: nowTempC,
-                lowC: nowTempC,
-                label: 'Now',
-                interpolated: false,
-                // A single measured value, not a high/low window: label and mark it as one.
-                observed: true
-            }];
-
-            plotSamples.forEach(b => {
-                points.push({
-                    dt: b.dt,
-                    tempC: b.tempC,
-                    highC: b.highC,
-                    lowC: b.lowC,
-                    label: formatHourLabel(b.dt, tz),
-                    interpolated: false
-                });
-            });
-
-            // Close the window on the horizon so the x span really is "now to now + 6 h", rather
-            // than stopping at the last sample inside it. Only done when the horizon is bracketed
-            // by real samples: if the response is degraded and stops short, ending the axis at
-            // the last real bucket is honest, whereas extending it would invent a flat segment.
-            const lastPoint = points[points.length - 1];
-            const lastSample = samples[samples.length - 1];
-            if (lastPoint.dt < t1 && t1 <= lastSample.dt) {
-                points.push({
-                    dt: t1,
-                    tempC: interpolateAt('tempC', t1),
-                    highC: interpolateAt('highC', t1),
-                    lowC: interpolateAt('lowC', t1),
-                    label: formatHourLabel(t1, tz),
-                    interpolated: true
-                });
-            }
-
-            return points;
-        }
 
         function formatHourLabel(dt, timezoneOffset) {
             const local = new Date((dt + (timezoneOffset || 0)) * 1000);
@@ -720,22 +819,254 @@
             return `${local.getUTCFullYear()}-${month}-${day}`;
         }
 
-        // 3-hourly forecast list -> up to 4 points: today (or the first day with data) + 3 more.
-        // Each point carries daily high, low, and prevailing weather condition.
-        function buildDailyTemps(current, forecastList) {
+        // --- Hourly: One Call ---
+        // One temperature per hour and nothing else -- no min/max. Every point therefore
+        // collapses its band (highC === lowC), which the chart detects and renders as a single
+        // measured line rather than a zero-width fill.
+        function buildHourlyTemps(current, hourlyList) {
+            const now = Math.floor(Date.now() / 1000);
+            const t0 = now;
+            const t1 = now + HOURLY_WINDOW_HOURS * 3600;
+
+            const readings = (hourlyList || [])
+                .filter(h => h && typeof h.dt === 'number' && typeof h.temp === 'number')
+                .map(h => ({ dt: h.dt, tempC: h.temp, ...conditionOf(h) }))
+                .sort((a, b) => a.dt - b.dt);
+
+            // No hourly block => no trend. Returning [] lets the chart say so rather than drawing
+            // a flat line that implies six hours of data we do not have.
+            if (!readings.length) return [];
+
+            // Linear lookup between real readings, used only to close the axis on the horizon.
+            const tempAt = t => {
+                const first = readings[0];
+                if (t <= first.dt) return first.tempC;
+                const last = readings[readings.length - 1];
+                if (t >= last.dt) return last.tempC;
+                for (let i = 1; i < readings.length; i++) {
+                    const prev = readings[i - 1], next = readings[i];
+                    if (t <= next.dt) {
+                        const gap = next.dt - prev.dt;
+                        if (gap <= 0) return next.tempC;
+                        return prev.tempC + ((t - prev.dt) / gap) * (next.tempC - prev.tempC);
+                    }
+                }
+                return last.tempC;
+            };
+
+            const inWindow = readings.filter(r => r.dt > t0 && r.dt <= t1);
+
+            // The guard on length keeps at least one real reading to draw: if the imminent one is
+            // the only sample in the window, dropping it would leave a lone observation.
+            const dropLeading = inWindow.length > 1 && (inWindow[0].dt - t0) < IMMINENT_HOURLY_SECONDS;
+            const plotted = dropLeading ? inWindow.slice(1) : inWindow;
+
+            const nowTempC = typeof current?.main?.temp === 'number' ? current.main.temp : readings[0].tempC;
+            const tz = current?.timezone;
+
+            // The observation carries the CURRENT condition, not an interpolated one. That is a
+            // real reading from the same response, so the "Now" icon is as measured as its value.
+            const points = [{
+                dt: t0,
+                tempC: nowTempC,
+                highC: nowTempC,
+                lowC: nowTempC,
+                label: 'Now',
+                interpolated: false,
+                // A single measured value, not a high/low window: label and mark it as one.
+                observed: true,
+                ...conditionOf(current)
+            }];
+
+            plotted.forEach(r => {
+                points.push({
+                    dt: r.dt,
+                    tempC: r.tempC,
+                    highC: r.tempC,
+                    lowC: r.tempC,
+                    label: formatHourLabel(r.dt, tz),
+                    interpolated: false,
+                    condId: r.condId,
+                    condMain: r.condMain
+                });
+            });
+
+            // Close the axis on the horizon so the span really is "now to now + 6 h" instead of
+            // stopping at the last whole hour. Only done when the horizon is bracketed by real
+            // readings; if the series stops short, ending at the last real reading is honest.
+            //
+            // This sample deliberately carries NO condition. Temperature interpolates; a weather
+            // condition does not -- there is no such thing as "half cloudy" between 4 PM and
+            // 5 PM, so inventing one would state something the API never said. Its dot is already
+            // drawn hollow to mark it as derived, and it simply has no icon.
+            const lastPoint = points[points.length - 1];
+            const lastReading = readings[readings.length - 1];
+            if (lastPoint.dt < t1 && t1 <= lastReading.dt) {
+                points.push({
+                    dt: t1,
+                    tempC: tempAt(t1),
+                    highC: tempAt(t1),
+                    lowC: tempAt(t1),
+                    label: formatHourLabel(t1, tz),
+                    interpolated: true
+                });
+            }
+
+            return points;
+        }
+
+        // --- Hourly: 3-hourly buckets (fallback) ---
+        // The shape this app used before One Call. A 6 h window holds at most two real buckets,
+        // so the line between them is the interpolation -- no synthetic hourly points are
+        // invented. Points are the observation, every real bucket in the window, and one closing
+        // sample on the horizon.
+        //
+        // Unlike the One Call path, each real bucket here carries its own temp_min/temp_max, so
+        // the shaded band has a real envelope and the chart will render it.
+        function buildHourlyTempsFromBuckets(current, forecastList) {
+            const now = Math.floor(Date.now() / 1000);
+            const t0 = now;
+            const t1 = now + HOURLY_WINDOW_HOURS * 3600;
+
+            const buckets = (forecastList || [])
+                .filter(item => item && typeof item.dt === 'number' && item.main && typeof item.main.temp === 'number')
+                .map(item => ({
+                    dt: item.dt,
+                    tempC: item.main.temp,
+                    highC: item.main.temp_max ?? item.main.temp,
+                    lowC: item.main.temp_min ?? item.main.temp,
+                    ...conditionOf(item)
+                }))
+                .sort((a, b) => a.dt - b.dt);
+
+            // No usable buckets => no trend. Returning [] lets the chart say so rather than
+            // drawing a flat line that implies six hours of data we do not have.
+            if (!buckets.length) return [];
+
+            // Piecewise-linear lookup over the real buckets, by NAMED FIELD. Reading .dt/.v off
+            // values produced by a field selector is what previously made this return undefined
+            // and collapsed the whole plot outside the viewBox, so the {dt, <field>} shape stays.
+            const at = (field, t) => {
+                const first = buckets[0];
+                if (t <= first.dt) return first[field];
+                const last = buckets[buckets.length - 1];
+                if (t >= last.dt) return last[field];
+                for (let i = 1; i < buckets.length; i++) {
+                    const prev = buckets[i - 1], next = buckets[i];
+                    if (t <= next.dt) {
+                        const gap = next.dt - prev.dt;
+                        if (gap <= 0) return next[field];
+                        return prev[field] + ((t - prev.dt) / gap) * (next[field] - prev[field]);
+                    }
+                }
+                return last[field];
+            };
+
+            const inWindow = buckets.filter(b => b.dt > t0 && b.dt <= t1);
+
+            // An imminent bucket stays in `buckets`, so it still shapes the closing sample, but
+            // it is not plotted: sitting a few pixels from the left edge it would produce a
+            // near-vertical spike out of the observation instead of a trend line.
+            const dropLeading = inWindow.length > 1 && (inWindow[0].dt - t0) < IMMINENT_BUCKET_SECONDS;
+            const plotted = dropLeading ? inWindow.slice(1) : inWindow;
+
+            const nowTempC = typeof current?.main?.temp === 'number' ? current.main.temp : buckets[0].tempC;
+            const tz = current?.timezone;
+
+            // "Now" is a single reading, not a window: the observation reports one temperature
+            // and no meaningful spread. The band starts collapsed on it and fans out to the first
+            // forecast bucket, so the left-hand point means what it says.
+            const points = [{
+                dt: t0,
+                tempC: nowTempC,
+                highC: nowTempC,
+                lowC: nowTempC,
+                label: 'Now',
+                interpolated: false,
+                observed: true,
+                ...conditionOf(current)
+            }];
+
+            plotted.forEach(b => {
+                points.push({
+                    dt: b.dt,
+                    tempC: b.tempC,
+                    highC: b.highC,
+                    lowC: b.lowC,
+                    label: formatHourLabel(b.dt, tz),
+                    interpolated: false,
+                    condId: b.condId,
+                    condMain: b.condMain
+                });
+            });
+
+            const lastPoint = points[points.length - 1];
+            const lastBucket = buckets[buckets.length - 1];
+            if (lastPoint.dt < t1 && t1 <= lastBucket.dt) {
+                points.push({
+                    dt: t1,
+                    tempC: at('tempC', t1),
+                    highC: at('highC', t1),
+                    lowC: at('lowC', t1),
+                    label: formatHourLabel(t1, tz),
+                    interpolated: true
+                });
+            }
+
+            return points;
+        }
+
+        // --- Daily: One Call ---
+        // The daily block already reduces each day to one object with temp.min / temp.max, so no
+        // bucketing is needed: filter, sort, take four, map.
+        function buildDailyTemps(current, dailyList) {
+            const tz = current.timezone || 0;
+            const todayKey = localDateKey(Math.floor(Date.now() / 1000), tz);
+
+            return (dailyList || [])
+                .filter(d => d && typeof d.dt === 'number' && d.temp
+                    && typeof d.temp.min === 'number' && typeof d.temp.max === 'number')
+                .sort((a, b) => a.dt - b.dt)
+                .slice(0, 4)
+                .map(d => {
+                    const key = localDateKey(d.dt, tz);
+                    // Labelled by DATE, not by position. One Call's first daily entry is the
+                    // current local day, and its envelope covers the whole day -- the API already
+                    // accounts for the hours that have passed -- so "Today" is accurate here.
+                    const label = key === todayKey
+                        ? 'Today'
+                        : new Date((d.dt + tz) * 1000).toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' });
+                    return {
+                        dt: d.dt,
+                        // temp.day is the daytime reading; fall back to the envelope midpoint if a
+                        // partial response omits it.
+                        tempC: typeof d.temp.day === 'number' ? d.temp.day : (d.temp.max + d.temp.min) / 2,
+                        highC: d.temp.max,
+                        lowC: d.temp.min,
+                        label,
+                        ...conditionOf(d)
+                    };
+                });
+        }
+
+        // --- Daily: 3-hourly buckets (fallback) ---
+        // Bucketed by local calendar date and reduced to at most four points. Conditions are
+        // tallied per bucket so each day carries the condition that actually prevailed, not
+        // whichever bucket happened to come first.
+        function buildDailyTempsFromBuckets(current, forecastList) {
             const tz = current.timezone || 0;
             const buckets = {};
 
-            forecastList.forEach(item => {
+            (forecastList || []).forEach(item => {
                 if (!item || !item.main || typeof item.main.temp !== 'number') return;
                 const key = localDateKey(item.dt, tz);
-                if (!buckets[key]) buckets[key] = { highs: [], lows: [], dt: item.dt, condTally: {} };
-                // Use temp_min / temp_max if available, otherwise temp itself
+                if (!buckets[key]) buckets[key] = { highs: [], lows: [], dt: item.dt, condTally: {}, condMainById: {} };
                 buckets[key].highs.push(item.main.temp_max ?? item.main.temp);
-                buckets[key].lows.push(item.main.temp_min  ?? item.main.temp);
-                if (item.weather?.[0]) {
-                    const id = item.weather[0].id;
-                    buckets[key].condTally[id] = (buckets[key].condTally[id] || 0) + 1;
+                buckets[key].lows.push(item.main.temp_min ?? item.main.temp);
+                const w = item.weather?.[0];
+                if (w && typeof w.id === 'number') {
+                    buckets[key].condTally[w.id] = (buckets[key].condTally[w.id] || 0) + 1;
+                    if (typeof w.main === 'string') buckets[key].condMainById[w.id] = w.main;
                 }
             });
 
@@ -746,10 +1077,11 @@
             // comes from the forecast buckets alone, so there is exactly one source of truth.
             const nowDt = Math.floor(Date.now() / 1000);
             const todayKey = localDateKey(nowDt, tz);
-            if (!buckets[todayKey]) buckets[todayKey] = { highs: [], lows: [], dt: nowDt, condTally: {} };
-            if (current.weather?.[0]) {
-                const id = current.weather[0].id;
-                buckets[todayKey].condTally[id] = (buckets[todayKey].condTally[id] || 0) + 1;
+            if (!buckets[todayKey]) buckets[todayKey] = { highs: [], lows: [], dt: nowDt, condTally: {}, condMainById: {} };
+            const nowW = current.weather?.[0];
+            if (nowW && typeof nowW.id === 'number') {
+                buckets[todayKey].condTally[nowW.id] = (buckets[todayKey].condTally[nowW.id] || 0) + 1;
+                if (typeof nowW.main === 'string') buckets[todayKey].condMainById[nowW.id] = nowW.main;
             }
 
             // Only buckets that actually hold forecast temperature samples can produce a
@@ -767,25 +1099,29 @@
             return days.map(key => {
                 const b = buckets[key];
                 const highC = Math.max(...b.highs);
-                const lowC  = Math.min(...b.lows);
-                const tempC = (highC + lowC) / 2;
-
-                // Label by DATE, not by position. The first surviving bucket is only today if
-                // today still has forecast samples left in it; late in the evening the next
-                // 3-hourly bucket is already past local midnight, today's bucket holds no
-                // samples and is filtered out above, and a positional label called tomorrow
-                // "Rest of today". Even when today does survive, it is still only the REST of
-                // today: an earlier high has already passed and is not in the data, so the
-                // label must not claim a full-day envelope.
+                const lowC = Math.min(...b.lows);
+                // Labelled by DATE, not by position. Late in the evening today has no forecast
+                // samples left, drops out above, and a positional label would call tomorrow
+                // "Rest of today". Even when today survives it is only the REST of today: an
+                // earlier high has already passed and is not in the data.
                 const label = key === todayKey
                     ? 'Rest of today'
                     : new Date((b.dt + tz) * 1000).toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' });
 
-                const tally = b.condTally;
-                const condId = Object.keys(tally).length
-                    ? Number(Object.keys(tally).reduce((a, c) => tally[a] > tally[c] ? a : c))
+                const ids = Object.keys(b.condTally);
+                const condId = ids.length
+                    ? Number(ids.reduce((a, c) => b.condTally[a] > b.condTally[c] ? a : c))
                     : null;
-                return { dt: b.dt, tempC, highC, lowC, label, condId };
+
+                return {
+                    dt: b.dt,
+                    tempC: (highC + lowC) / 2,
+                    highC,
+                    lowC,
+                    label,
+                    condId,
+                    condMain: condId != null ? (b.condMainById[condId] || '') : ''
+                };
             });
         }
 
@@ -794,10 +1130,10 @@
 
         // Escape untrusted text before interpolating it into innerHTML.
         // renderCard() builds markup with template strings, so every value that comes from the
-        // API response (city name, country, condition description/main, and the forecast note
-        // that embeds an error message) must pass through here. This also covers attribute
-        // contexts such as title="..." and alt="...": a quote in a city name would otherwise
-        // break out of the attribute.
+        // API response (city name, country, condition description/main, and the note text that
+        // embeds an error message) must pass through here. This also covers attribute contexts
+        // such as title="..." and alt="...": a quote in a city name would otherwise break out of
+        // the attribute.
         function esc(value) {
             return String(value ?? '')
                 .replace(/&/g, '&amp;')
@@ -825,18 +1161,18 @@
         }
 
         // --- Spline geometry: a smooth curve through the data points ---
-        // The plot is drawn as a curve, not a polyline. A straight segment between two buckets
-        // asserts a constant rate of change across those hours, which the data does not say, and
-        // the kinks at each bucket are noise rather than signal.
+        // The plot is drawn as a curve, not a polyline. A straight segment between two readings
+        // asserts a constant rate of change across that hour, which the data does not say, and
+        // the kinks at each reading are noise rather than signal.
         //
         // The interpolant is a monotone cubic Hermite spline with Fritsch-Carlson tangents, not a
         // Catmull-Rom or a natural cubic. Both of those overshoot near local extrema, so a drawn
-        // peak could sit above the warmest measured high and a trough below the coldest measured
-        // low -- the chart would state a temperature nobody observed. Fritsch-Carlson limits each
-        // tangent to three times its adjacent secant, which keeps the curve inside the envelope of
-        // its own data, keeps it free of loops (x is time and must never double back), and is
-        // still C1 smooth. It is also symmetric under reversal, which is what lets the band's
-        // return edge reuse the same tangents.
+        // peak could sit above the warmest measured reading and a trough below the coldest -- the
+        // chart would state a temperature nobody observed. Fritsch-Carlson limits each tangent to
+        // three times its adjacent secant, which keeps the curve inside the envelope of its own
+        // data, keeps it free of loops (x is time and must never double back), and is still C1
+        // smooth. It is also symmetric under reversal, which is what lets the band's return edge
+        // reuse the same tangents.
         function monotoneTangents(pts) {
             const n = pts.length;
             if (n < 2) return new Array(n).fill(0);
@@ -892,12 +1228,14 @@
         }
 
         // --- Inline SVG line chart (no external chart library) ---
-        // Dual high/low lines with a shaded band between them.
+        // A temperature line, plus a shaded high/low band whenever the data actually carries an
+        // envelope. One Call's hourly points have no spread, so the hourly view renders a single
+        // measured line; the 3-hourly fallback does carry min/max, so its hourly view keeps the
+        // band. The chart therefore keys off the data rather than off the source.
         //
         // opts.timeAxis: position points by timestamp instead of by index. Used by the hourly
-        // view, where real 3-hourly samples sit at uneven offsets from "now". The daily view
-        // keeps index spacing: each of its points stands for a whole day, not an instant, and
-        // evening-to-midnight buckets would otherwise bunch up at one end.
+        // view, where readings sit at real clock times. The daily view keeps index spacing: each
+        // of its points stands for a whole day, not an instant.
         function buildTempChartSVG(points, gradientId, width, height, opts) {
             const options = opts || {};
             if (!Array.isArray(points) || points.length < 2) {
@@ -945,6 +1283,10 @@
                 return Math.abs(p.highC - p.lowC) < 0.01;
             };
 
+            // One flag for the whole series. When no point has a spread there is no envelope to
+            // shade, and drawing the low curve would simply retrace the high curve on top of it.
+            const hasBand = points.some((p, i) => !isDegenerate(i));
+
             const hasCondIcons = points.some(p => p.condId != null);
 
             const W = Math.max(120, Math.round(width));
@@ -967,9 +1309,9 @@
             const clampX = (x, tw) => Math.min(Math.max(x, tw / 2 + 2), W - tw / 2 - 2);
 
             // Thin by available pixels rather than by index parity. Under even spacing "every
-            // other point" is workable, but with real timestamps a bucket can land close to the
+            // other point" is workable, but with real timestamps a reading can land close to the
             // window edge, where parity both overlaps and leaves gaps. The last item of a row is
-            // reserved -- dropping it leaves the axis visibly unfinished.
+            // reserved -- dropping it leaves the row visibly unfinished.
             function thinRow(items, gap) {
                 const kept = [];
                 const lastIndex = items.length - 1;
@@ -992,8 +1334,7 @@
 
             // --- X-axis furniture ---
             // The hourly view gets a true clock axis (Now, +1 h ... +6 h), because its data
-            // points sit at uneven times and an index axis would imply hourly samples. The daily
-            // view labels its four day buckets directly.
+            // points sit at real times. The daily view labels its four day buckets directly.
             const tickItems = [];
             if (timeAxis) {
                 for (let t = t0; t < t1; t += 3600) {
@@ -1016,12 +1357,12 @@
             }
 
             // --- Bottom padding ---
-            // Two bands live under the plot: the x-axis ticks, and the below-lane value labels
-            // that hang just beneath the plot floor. Both must be reserved. Reserving only the
-            // label's OFFSET left the two bands overlapping, so on a flat series -- where the
-            // low dot sits exactly on the plot floor -- the right-most L: label was drawn into
-            // the tick row and overprinted by the hour mark. The label's own text height is part
-            // of the reservation now, not just its distance from the floor.
+            // Up to three bands can live under the plot: the x-axis ticks, the below-lane value
+            // labels that hang just beneath the plot floor, and the condition icon row. Each must
+            // be reserved. Reserving only a label's OFFSET once left the labels overlapping the
+            // tick row, so on a flat series -- where the low dot sits exactly on the plot floor --
+            // the right-most L: label was drawn into the tick row and overprinted by the hour
+            // mark. The label's own text height is part of the reservation now.
             const tickBlock = xFont + 6
                 + Math.max(0, labelRows.length - 1) * (xFont + 5)
                 + (hasCondIcons ? iconSize + 4 : 0);
@@ -1032,7 +1373,9 @@
                 top: tight ? 28 : 36,
                 right: padRight,
                 left: padLeft,
-                bottom: tickBlock + valueLabelBlock
+                // A single-line series prints nothing below the curve, so the below-lane band is
+                // only reserved when there is a band to label.
+                bottom: tickBlock + (hasBand ? valueLabelBlock : 0)
             };
 
             const availH = H - pad.top - pad.bottom;
@@ -1078,8 +1421,8 @@
             };
 
             // --- Dots ---
-            // A derived point (the window edge) is drawn hollow and open: interpolation is fine
-            // to show, but the dot says "this reading was calculated, not measured".
+            // A derived point (the horizon sample) is drawn hollow and open: interpolation is
+            // fine to show, but the dot says "this reading was calculated, not measured".
             const highColor = '#fcd34d';
             const lowColor  = '#7dd3fc';
             const observedColor = '#ffffff';
@@ -1094,10 +1437,8 @@
             // prefixes are dropped: the amber/sky dots already carry that meaning.
             //
             // Interpolation is NOT a reason to withhold a number, so a derived point prints the
-            // same H:/L: pair as a measured one. Withholding them previously dropped the closing
-            // point's low entirely -- it printed a single mid-value above the dot, which read as
-            // a high, and no L: ever appeared. Only a genuinely collapsed band prints one value,
-            // and then it prints no L: at all rather than repeating the same number below.
+            // same label as a measured one. Only a genuinely collapsed band prints a single
+            // value, and then it prints no L: at all rather than repeating the number below.
             const aboveLane = [];
             const belowLane = [];
             let dotsHtml = '';
@@ -1159,26 +1500,56 @@
                 `<text x="${t.cx.toFixed(1)}" y="${rowY(r).toFixed(1)}" text-anchor="middle" font-size="${xFont}" font-weight="600" fill="rgba(255,255,255,0.92)" style="${haloStyle}stroke:rgba(10,15,30,0.85);stroke-width:3.5px;" filter="url(#${filterId})">${t.text}</text>`
             ).join('')).join('');
 
-            // Condition icons (daily mode) as HTML inside foreignObject
+            // --- Condition icons ---
+            // Emoji live in HTML inside a foreignObject because SVG <text> cannot reliably render
+            // colour emoji across platforms. Icons are thinned by pixel spacing: the daily view's
+            // four points always fit, but the hourly view has up to seven and a narrow card cannot
+            // fit them side by side, so overlapping icons would smear into an unreadable clump.
+            // The last icon in the row is always kept, otherwise the row visibly stops short of
+            // the newest hour -- the one a reader is most likely to care about.
             const iconY = H - iconSize - 1;
-            const condIcons = hasCondIcons ? hPts.map((p, i) => {
-                const emoji = condIdToEmoji(points[i].condId);
-                if (!emoji) return '';
-                const x = Math.min(Math.max(p.x - iconSize / 2, 1), W - iconSize - 1);
-                return `<foreignObject x="${x.toFixed(1)}" y="${iconY.toFixed(1)}" width="${iconSize}" height="${iconSize}" style="overflow:visible;">
-                        <div xmlns="http://www.w3.org/1999/xhtml" style="width:${iconSize}px;height:${iconSize}px;display:flex;align-items:center;justify-content:center;font-size:${iconFont}px;line-height:1;font-family:'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji','Twemoji Mozilla','EmojiOne Color','Android Emoji',sans-serif;">${emoji}</div>
-                    </foreignObject>`;
-            }).join('') : '';
+            const iconItems = hPts.map((p, i) => ({
+                x: p.x,
+                emoji: condIdToEmoji(points[i].condId)
+            })).filter(it => it.emoji);
 
-            // The chart is role="img": thinning labels must not make it silent for screen
-            // readers, so the actual readings are carried in the accessible name instead.
+            const iconGap = iconSize + 2;
+            const keptIcons = [];
+            iconItems.forEach((it, n) => {
+                const prev = keptIcons[keptIcons.length - 1];
+                if (prev && it.x - prev.x < iconGap) {
+                    if (n !== iconItems.length - 1) return;
+                    keptIcons.pop();
+                }
+                keptIcons.push(it);
+            });
+
+            const condIcons = keptIcons.map(it => {
+                const x = Math.min(Math.max(it.x - iconSize / 2, 1), W - iconSize - 1);
+                return `<foreignObject x="${x.toFixed(1)}" y="${iconY.toFixed(1)}" width="${iconSize}" height="${iconSize}" style="overflow:visible;">
+                        <div xmlns="http://www.w3.org/1999/xhtml" style="width:${iconSize}px;height:${iconSize}px;display:flex;align-items:center;justify-content:center;font-size:${iconFont}px;line-height:1;font-family:'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji','Twemoji Mozilla','EmojiOne Color','Android Emoji',sans-serif;">${it.emoji}</div>
+                    </foreignObject>`;
+            }).join('');
+
+            // The chart is role="img": thinning labels and icons must not make it silent for
+            // screen readers, so the actual readings -- including the expected condition, where
+            // one exists -- are carried in the accessible name instead.
             const unit = tempUnitSuffix();
             const described = points
-                .map((p, i) => tempVals[i] == null ? '' : `${p.label} ${Math.round(tempVals[i])}${unit}`)
+                .map((p, i) => {
+                    if (tempVals[i] == null) return '';
+                    const cond = p.condMain ? `, ${p.condMain.toLowerCase()}` : '';
+                    return `${p.label} ${Math.round(tempVals[i])}${unit}${cond}`;
+                })
                 .filter(Boolean)
                 .join(', ');
             const derivedNote = points.some(p => p.interpolated) ? ' Hollow marks are interpolated.' : '';
             const ariaLabel = `Temperature trend: ${described}.${derivedNote}`;
+
+            // The fill and the second stroke only exist when the data has a real envelope.
+            const bandLayer = hasBand ? `
+                <path d="${bandPath}" fill="url(#${gradientId}-band)"/>
+                <path d="${lowPath}" fill="none" stroke="${lowColor}" stroke-width="${tight ? 1.8 : 2.2}" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>` : '';
 
             return `
             <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="none" role="img" aria-label="${esc(ariaLabel)}">
@@ -1191,10 +1562,8 @@
                         <feDropShadow dx="0" dy="0" stdDeviation="1.5" flood-color="rgba(5,10,20,0.95)" flood-opacity="1"/>
                     </filter>
                 </defs>
-                ${grid}
-                <path d="${bandPath}" fill="url(#${gradientId}-band)"/>
+                ${grid}${bandLayer}
                 <path d="${highPath}" fill="none" stroke="${highColor}" stroke-width="${tight ? 1.8 : 2.2}" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
-                <path d="${lowPath}" fill="none" stroke="${lowColor}" stroke-width="${tight ? 1.8 : 2.2}" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
                 ${dotsHtml}
                 ${valueLabels}
                 ${xLabels}
@@ -1205,7 +1574,7 @@
         // --- Chart mounting / responsive redraw ---
         const chartState = new WeakMap();
 
-        function mountChart(element, hourly, daily, tz) {
+        function mountChart(element, hourly, daily, tz, source) {
             const host = element.querySelector('.chart-host');
             if (!host) return;
 
@@ -1214,7 +1583,16 @@
 
             // Preserve mode across re-mounts (unit toggle, re-compare)
             const prevMode = previous ? previous.mode : 'hourly';
-            const state = { hourly, daily: daily || [], mode: prevMode, tz: tz || 0, observer: null, lastW: 0, lastH: 0, frame: null };
+            const state = {
+                hourly,
+                daily: daily || [],
+                mode: prevMode,
+                tz: tz || 0,
+                // Which endpoint answered. Only affects the subtitle, but that label is the one
+                // place the coarser fallback is visible in the chart itself.
+                source: source === 'legacy' ? 'legacy' : 'onecall',
+                observer: null, lastW: 0, lastH: 0, frame: null
+            };
             chartState.set(element, state);
 
             state.activeData = () => state.mode === '3day' ? state.daily : state.hourly;
@@ -1275,6 +1653,7 @@
         function renderCard(element, payload) {
             const data = payload.current;
             const hourly = payload.hourly || [];
+            const source = payload.source === 'legacy' ? 'legacy' : 'onecall';
 
             // A partial response can omit weather[] entirely. The old code dereferenced
             // data.weather[0].icon directly and threw mid-render, leaving a half-written card.
@@ -1331,6 +1710,18 @@
             // Preserve flip state across re-renders (unit toggle, re-compare)
             const wasFlipped = element.dataset.flipped === 'true';
 
+            // Two note tones, because two different things get said here. A warn note means data
+            // is missing; an info note means the data is coarser because of the key, which is not
+            // a fault. Styling them the same would make a working fallback look broken.
+            const isWarnNote = !!payload.note && payload.note.tone === 'warn';
+            const noteTone = isWarnNote
+                ? 'bg-amber-400/25 border-amber-200/40 text-amber-50'
+                : 'bg-white/15 border-white/25 text-blue-50';
+
+            // Chart state is read before the innerHTML write so the subtitle and toggle label
+            // render with the current mode rather than the default one.
+            const chartMode = (chartState.get(element) && chartState.get(element).mode === '3day') ? '3day' : 'hourly';
+
             // Card element = perspective container; the flip transform lives on .card-inner.
             // Deliberately a plain div with no role and no tabindex: the flip controls are real
             // buttons inside the faces, so the container must not be announced as a button.
@@ -1380,11 +1771,13 @@
                             </div>
                         </div>
 
-                        ${payload.forecastNote ? `
-                        <!-- Forecast degraded but current conditions succeeded: say so explicitly. -->
-                        <div class="forecast-note mb-3 md:mb-4 flex items-start gap-1.5 px-2 py-1.5 md:px-3 md:py-2 bg-amber-400/25 border border-amber-200/40 rounded-lg text-[10px] md:text-xs font-semibold leading-tight text-amber-50 ${textShadow}" role="status">
-                            <span aria-hidden="true" class="shrink-0">⚠</span>
-                            <span>${esc(payload.forecastNote)}. Current conditions only.</span>
+                        ${payload.note ? `
+                        <!-- Either data is missing (warn) or the data is coarser because this key has
+                             no One Call access (info). Both are worth saying; only the first is a fault. -->
+                        <div class="forecast-note mb-3 md:mb-4 flex items-start gap-1.5 px-2 py-1.5 md:px-3 md:py-2 border rounded-lg text-[10px] md:text-xs font-semibold leading-tight ${noteTone} ${textShadow}" role="status">
+                            <span aria-hidden="true" class="shrink-0">${isWarnNote ? '⚠' : 'ℹ'}</span>
+                            <span class="flex-1">${esc(payload.note.text)}</span>
+                            ${isWarnNote ? '' : `<button type="button" class="retry-onecall shrink-0 underline decoration-dotted underline-offset-2 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-white/70">Retry</button>`}
                         </div>` : ''}
 
                         <!-- Flip control: a real button, so it is reachable and announced correctly -->
@@ -1401,11 +1794,11 @@
                     <div class="trend-header flex items-start justify-between gap-2">
                         <div class="min-w-0">
                             <h3 class="text-sm md:text-lg font-bold text-white ${textShadow} truncate">${esc(data.name)}</h3>
-                            <p class="trend-subtitle text-[10px] md:text-xs font-bold uppercase tracking-wide text-blue-100 ${textShadow}">${(chartState.get(element) && chartState.get(element).mode === '3day') ? 'Next 3 days' : 'Next 6 hrs · 3-hourly'} · ${tempUnitSuffix()}</p>
+                            <p class="trend-subtitle text-[10px] md:text-xs font-bold uppercase tracking-wide text-blue-100 ${textShadow}">${trendSubtitle(chartMode, source)}</p>
                         </div>
                         <button class="trend-toggle flex items-center gap-1 px-2 py-1 bg-white/20 hover:bg-white/30 active:bg-white/40 rounded-lg text-[10px] md:text-xs font-bold text-white border border-white/25 transition-colors shrink-0" title="Toggle time range">
                             <i data-lucide="calendar" class="w-3 h-3"></i>
-                            <span class="trend-toggle-label">${(chartState.get(element) && chartState.get(element).mode === '3day') ? '6 hrs' : '3 day'}</span>
+                            <span class="trend-toggle-label">${chartMode === '3day' ? '6 hrs' : '3 day'}</span>
                         </button>
                     </div>
 
@@ -1421,7 +1814,7 @@
             </div>
         `;
 
-            mountChart(element, hourly, payload.daily || [], data.timezone);
+            mountChart(element, hourly, payload.daily || [], data.timezone, source);
 
             // Essential, not redundant: renderCard rebuilds innerHTML on every unit toggle and
             // re-compare, while the template preserves .flipped. A freshly written face has no
