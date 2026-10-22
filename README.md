@@ -13,7 +13,7 @@ static files served as-is.
 |---|---|
 | `index.html` | The entire application — markup, styles (Tailwind via CDN), all JavaScript, and the inline SVG trend chart. Single file. |
 | `manifest.json` | PWA manifest: app name, `start_url`, standalone display, theme/background colors, icon entries. |
-| `sw.js` | Service worker: pre-caches the app shell and CDN assets, serves navigations network-first and static assets stale-while-revalidate, and clears old cache versions on activate. Cache name is versioned (`weather-compare-v23`). |
+| `sw.js` | Service worker: pre-caches the app shell and CDN assets, serves navigations network-first and static assets stale-while-revalidate, and clears old cache versions on activate. Cache name is versioned (`weather-compare-v26`). |
 | `icon.png` | 512x512 app icon, referenced by `manifest.json`. |
 | `icon-192.png` | 192x192 app icon — a downscale of `icon.png`. Chromium's install criteria want both a 192px and a 512px icon. |
 
@@ -39,9 +39,9 @@ or any static host.
 
 If you change `sw.js` or any asset listed in `ASSETS_TO_CACHE` — in practice that means
 `index.html`, since the chart and all app logic live there — bump `CACHE_NAME`, for example
-`v23` to `v24`. Without the bump, returning visitors keep being served the previous shell, and
+`v26` to `v27`. Without the bump, returning visitors keep being served the previous shell, and
 accepting the update prompt re-loads bytes that did not change. The current version is
-`weather-compare-v23`.
+`weather-compare-v26`.
 
 ## Updating the app — the worker and the page are a pair
 
@@ -179,34 +179,40 @@ chart library and no canvas. The chart has two modes, toggled by the calendar bu
 ### Hourly view: now to now plus six hours
 
 The window width is `HOURLY_WINDOW_HOURS` (6). Its points are the observation at "Now" followed
-by each forecast sample inside the window, plus one sample interpolated onto the window edge so
-the axis really spans six hours rather than stopping at the last whole hour. That edge sample is
-flagged `interpolated` and drawn hollow.
+by each forecast sample inside the window — that is, one dot, one clock label, one value label
+and one condition icon per reading.
 
-Under One Call the samples are hourly and lie on the :00 marks; under the fallback they are
-3-hourly, so a six-hour window holds at most two of them and the line between them is the
-interpolation. The subtitle always names which it is — "Next 6 hrs · hourly" versus "Next 6 hrs
-· 3-hourly" — because a coarser chart should be attributable to the key, not look like a bug.
+Under One Call the samples are hourly; under the fallback they are 3-hourly, so a six-hour
+window holds at most two of them and the line between them is the interpolation. The subtitle
+always names which it is — "Next 6 hrs · hourly" versus "Next 6 hrs · 3-hourly" — because a
+coarser chart should be attributable to the key, not look like a bug.
 
-A sample too close to "now" is excluded from the drawn points while still feeding interpolation.
-The threshold differs by source because the failure differs: 20 minutes for hourly data, where
-the only problem is a dot landing on top of the observation marker, and 90 minutes for the
-3-hourly fallback, where a bucket a few pixels from the left edge produces a near-vertical spike.
+The line and the shaded band are extended to the six-hour mark by a **tail**: a final sample
+interpolated onto the window edge. It is geometry only — no dot, no value label, no clock label,
+no icon. That is deliberate. A clock label there would just repeat the hour of the reading
+before it (the tail almost always falls inside that same clock hour), a condition there cannot
+be interpolated (there is no such thing as half-cloudy between 4 PM and 5 PM), and a value there
+would be the only number on the chart that no sample backs. Keeping the tail out of the three
+label rows is what makes the dot count, the clock-label count and the icon count agree.
+
+Clock labels include minutes when the city's UTC offset is not a whole hour. Newfoundland is
+−2:30 in summer, so its hourly samples land on the half hour, and printing "8 AM" for an 8:30
+reading would simply be wrong.
+
+A sample too close to "now" is dropped from the drawn points. The threshold differs by source
+because the failure differs: five minutes for hourly data, where the only problem is a dot
+landing on top of the observation marker, and ninety minutes for the 3-hourly fallback, where a
+bucket a few pixels from the left edge produces a near-vertical spike.
 
 ### Expected conditions
 
-Every point carries the condition reported for that specific hour, shown as an emoji in a row
+Every reading carries the condition reported for that specific hour, shown as an emoji in a row
 beneath the axis. This applies to both views and both sources: the hourly row shows what is
 expected hour by hour, so a front arriving at 4 PM is visible rather than averaged into a single
 day icon.
 
 The "Now" point uses the condition from the current-conditions block — a real measurement from
 the same response, not an interpolated one.
-
-The window-edge sample deliberately carries **no** condition. Temperature interpolates between
-two readings; a weather condition does not — there is no such thing as half-cloudy between
-4 PM and 5 PM — so inventing one would state something the API never said. Its dot is already
-hollow to mark it as derived, and it simply has no icon.
 
 Icons are thinned by pixel spacing. Four daily points always fit, but up to seven hourly points
 do not on a narrow card, and overlapping glyphs smear into an unreadable clump. As with the axis
@@ -260,6 +266,16 @@ These are load-bearing. Simplify them and the picture silently goes wrong.
 - Collapse is decided in source units. A point counts as degenerate, and prints one value with
   no low label, only when its high and low are genuinely equal, not when they merely round
   together on screen.
+- Every label row is anchored to the readings. Clock labels, condition icons and dots are all
+  derived from the same point list and all skip the tail, so the three can never disagree about
+  how many hours are being shown. Do not reintroduce a sample that is half point and half
+  geometry.
+- Bottom padding reserves every band that will actually be drawn, and always clears the lowest
+  dot. A dot is drawn around its centre, so a series whose minimum sits on the plot floor — the
+  normal case, since the scale comes from the data's own min and max — needs its radius reserved
+  before the next band begins. That is why the single-line series reserves a dot clearance where
+  a banded series reserves the below-lane label instead: they are alternatives, not allowances
+  to be stacked.
 - A missing sample must never poison the axis. Unusable readings are carried forward from the
   nearest known value so the geometry stays finite; if nothing is usable, the chart says
   "Trend data unavailable" rather than drawing a wrong line.
@@ -270,19 +286,21 @@ These are load-bearing. Simplify them and the picture silently goes wrong.
 - Value labels live in lanes, and both the value labels and the condition icons thin by pixel
   width rather than by index parity, always keeping the last item so the row is not visibly
   truncated.
-- Bottom padding reserves every band that will actually be drawn: the x-axis tick row, the
-  condition icon row when present, and the below-lane value labels when a band exists.
 - Date keys are zero-padded. Local date buckets sort as strings, and the unpadded form puts
   `2026-9-30` after `2026-10-25` because `9` sorts above `1` — a bug that appears once a year
   and is then impossible to reproduce.
 - The chart is `role="img"` with a data-carrying label. Thinning labels and icons is a visual
-  compromise, so the `aria-label` enumerates each time, rounded value, and expected condition,
-  and notes that hollow marks are interpolated.
+  compromise, so the `aria-label` enumerates each time, rounded value, and expected condition.
 
 ## Known issues / backlog
 
 Tracked work lives in the project backlog. This is the state of the rough edges as found.
 
+- The top of the plot has no equivalent clearance. The highest reading's value label is drawn
+  above its dot inside the top padding, which is ample today, but nothing reserves that space
+  explicitly the way the bottom now does.
+- The tail is drawn but not described. The accessible name stops at the last reading, so a
+  screen-reader user is not told that the line continues to the six-hour mark.
 - The fallback is announced but not explained in place. A user whose key is merely not yet active
   sees an info note and a Retry button; nothing tells them the usual cause is a two-hour
   activation delay unless they read this file.
@@ -310,8 +328,8 @@ Tracked work lives in the project backlog. This is the state of the rough edges 
   `buildHourlyTempsFromBuckets`, `buildDailyTemps`, `buildDailyTempsFromBuckets`,
   `buildTempChartSVG`, `monotoneTangents`) over plain objects, so a static harness that stubs
   `fetch` with captured One Call **and** 2.5 responses could assert that both paths yield the
-  same record shape, that each point carries a condition where one is measurable, that the spline
-  never leaves its data envelope, and that labels exist for every point without a live key.
+  same record shape, that dots, clock labels and icons each number one per reading, that the
+  spline never leaves its data envelope, and that no element is drawn outside the viewBox.
   Nothing like that exists yet.
 - Installability is unverified in a real browser. `manifest.json` declares both a 192px and a
   512px icon, which is what Chromium asks for, but nobody has confirmed in Chrome that the
@@ -336,8 +354,11 @@ you bump it, and never reuse a name.
 
 | Version | Change |
 |---|---|
+| `v26` | The plot floor clears the lowest dot. Bottom padding now reserves the dot's radius when a series has no band, where before only the below-lane value label reserved that space — and the hourly One Call view has no band, so the lowest dot printed over the clock label beneath it. |
+| `v25` | The window-edge sample is geometry only — it stretches the line and the band to the six-hour mark with no dot, value label, clock label or icon, so dots, labels and icons are one-per-reading. Clock labels now include minutes for cities whose UTC offset is not a whole hour. |
+| `v24` | X-axis ticks anchored to the data points instead of an independent hourly grid, so a label and its icon are the same point. |
 | `v23` | One Call gained a fallback. A key One Call refuses with 401/403 drops to the free 2.5 pair — `/weather` plus 3-hourly `/forecast` — instead of failing the comparison. Both sources normalise to one record; the downgrade is announced on the card with a Retry action and remembered per key so it is not re-probed every comparison. |
-| `v22` | Expected weather per hour. Hourly points now carry their condition id, so the icon row renders in both views; it thins by pixel spacing because seven hourly icons do not fit where four daily ones did. The interpolated horizon sample carries no condition. |
+| `v22` | Expected weather per hour. Hourly points now carry their condition id, so the icon row renders in both views; it thins by pixel spacing because seven hourly icons do not fit where four daily ones did. |
 | `v21` | Data source moved to One Call 3.0. Hourly view is real hourly readings; the shaded band is now daily-view only, because the hourly block carries no min/max. Cities are geocoded first, since One Call is keyed by coordinate. |
 | `v20` | Daily view: forecast request raised to the endpoint maximum so four local calendar dates are available at any hour in any timezone, and the first point is labelled by its real local date instead of by position. Local date keys zero-padded so they sort across a single-digit month. |
 | `v19` | Trend lines drawn as monotone cubic splines with Fritsch-Carlson tangents, so peaks and troughs cannot overshoot the measured values. Dots and labels stay on the real data points. |
