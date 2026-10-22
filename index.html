@@ -792,20 +792,27 @@
 
         // A sample this close to "now" would be drawn on top of the observation dot. One Call's
         // hourly grid is fine enough that a nearby reading differs by very little, so the only
-        // problem is a cluttered dot.
-        const IMMINENT_HOURLY_SECONDS = 20 * 60;
+        // problem is the two markers touching -- a few pixels of separation is enough.
+        const IMMINENT_HOURLY_SECONDS = 5 * 60;
 
         // The 3-hourly fallback is a coarser grid: a bucket a few minutes out is drawn a few
         // pixels from the left edge, and the segment rising out of the observation becomes a
         // near-vertical spike rather than a trend. Half a bucket is the threshold.
         const IMMINENT_BUCKET_SECONDS = 90 * 60;
 
+        // Formats a sample time in the city's local zone. Minutes are included when the zone is
+        // not a whole-hour offset -- Newfoundland is -2:30 in summer, so its hourly samples fall
+        // on the half hour and printing "8 AM" for an 8:30 reading is simply wrong. There is no
+        // DST handling here because the offset the API returns is already DST-adjusted.
         function formatHourLabel(dt, timezoneOffset) {
             const local = new Date((dt + (timezoneOffset || 0)) * 1000);
-            let hour = local.getUTCHours();
-            const meridiem = hour >= 12 ? 'PM' : 'AM';
-            hour = hour % 12 || 12;
-            return `${hour} ${meridiem}`;
+            const h24 = local.getUTCHours();
+            const minutes = local.getUTCMinutes();
+            const meridiem = h24 >= 12 ? 'PM' : 'AM';
+            const hour = h24 % 12 || 12;
+            return minutes
+                ? `${hour}:${String(minutes).padStart(2, '0')} ${meridiem}`
+                : `${hour} ${meridiem}`;
         }
 
         // A sortable local-date key. Month and day are zero-padded: the unpadded form compares
@@ -837,7 +844,7 @@
             // a flat line that implies six hours of data we do not have.
             if (!readings.length) return [];
 
-            // Linear lookup between real readings, used only to close the axis on the horizon.
+            // Linear lookup between real readings, used only to place the window-edge tail.
             const tempAt = t => {
                 const first = readings[0];
                 if (t <= first.dt) return first.tempC;
@@ -872,7 +879,6 @@
                 highC: nowTempC,
                 lowC: nowTempC,
                 label: 'Now',
-                interpolated: false,
                 // A single measured value, not a high/low window: label and mark it as one.
                 observed: true,
                 ...conditionOf(current)
@@ -885,20 +891,24 @@
                     highC: r.tempC,
                     lowC: r.tempC,
                     label: formatHourLabel(r.dt, tz),
-                    interpolated: false,
                     condId: r.condId,
                     condMain: r.condMain
                 });
             });
 
-            // Close the axis on the horizon so the span really is "now to now + 6 h" instead of
-            // stopping at the last whole hour. Only done when the horizon is bracketed by real
-            // readings; if the series stops short, ending at the last real reading is honest.
+            // Extend the line to the window edge so the plot covers the full six hours instead of
+            // stopping at the last whole hour. This is a `tail`, not a point: the chart draws it
+            // as part of the line and the band, but gives it no dot, no value label, no clock tick
+            // and no condition icon.
             //
-            // This sample deliberately carries NO condition. Temperature interpolates; a weather
-            // condition does not -- there is no such thing as "half cloudy" between 4 PM and
-            // 5 PM, so inventing one would state something the API never said. Its dot is already
-            // drawn hollow to mark it as derived, and it simply has no icon.
+            // It used to be an ordinary point flagged `interpolated`, which made the counts
+            // disagree: seven dots and seven value labels against six clock labels, because a tick
+            // there had no icon to sit above -- and the label it would have carried ("11 AM")
+            // merely repeats the hour of the reading before it. Geometry is all it is entitled to.
+            //
+            // Only added when the horizon is bracketed by real readings: if the response stops
+            // short, ending the line at the last real reading is honest, whereas extending it
+            // would invent a flat segment.
             const lastPoint = points[points.length - 1];
             const lastReading = readings[readings.length - 1];
             if (lastPoint.dt < t1 && t1 <= lastReading.dt) {
@@ -908,7 +918,7 @@
                     highC: tempAt(t1),
                     lowC: tempAt(t1),
                     label: formatHourLabel(t1, tz),
-                    interpolated: true
+                    tail: true
                 });
             }
 
@@ -918,8 +928,8 @@
         // --- Hourly: 3-hourly buckets (fallback) ---
         // The shape this app used before One Call. A 6 h window holds at most two real buckets,
         // so the line between them is the interpolation -- no synthetic hourly points are
-        // invented. Points are the observation, every real bucket in the window, and one closing
-        // sample on the horizon.
+        // invented. Points are the observation and every real bucket in the window, with the same
+        // geometry-only tail on the horizon.
         //
         // Unlike the One Call path, each real bucket here carries its own temp_min/temp_max, so
         // the shaded band has a real envelope and the chart will render it.
@@ -964,9 +974,9 @@
 
             const inWindow = buckets.filter(b => b.dt > t0 && b.dt <= t1);
 
-            // An imminent bucket stays in `buckets`, so it still shapes the closing sample, but
-            // it is not plotted: sitting a few pixels from the left edge it would produce a
-            // near-vertical spike out of the observation instead of a trend line.
+            // An imminent bucket stays in `buckets`, so it still shapes the tail, but it is not
+            // plotted: sitting a few pixels from the left edge it would produce a near-vertical
+            // spike out of the observation instead of a trend line.
             const dropLeading = inWindow.length > 1 && (inWindow[0].dt - t0) < IMMINENT_BUCKET_SECONDS;
             const plotted = dropLeading ? inWindow.slice(1) : inWindow;
 
@@ -982,7 +992,6 @@
                 highC: nowTempC,
                 lowC: nowTempC,
                 label: 'Now',
-                interpolated: false,
                 observed: true,
                 ...conditionOf(current)
             }];
@@ -994,7 +1003,6 @@
                     highC: b.highC,
                     lowC: b.lowC,
                     label: formatHourLabel(b.dt, tz),
-                    interpolated: false,
                     condId: b.condId,
                     condMain: b.condMain
                 });
@@ -1009,7 +1017,7 @@
                     highC: at('highC', t1),
                     lowC: at('lowC', t1),
                     label: formatHourLabel(t1, tz),
-                    interpolated: true
+                    tail: true
                 });
             }
 
@@ -1233,6 +1241,11 @@
         // measured line; the 3-hourly fallback does carry min/max, so its hourly view keeps the
         // band. The chart therefore keys off the data rather than off the source.
         //
+        // One invariant drives most of the layout below: every clock label, every condition icon
+        // and every dot belongs to a real reading. A point marked `tail` is the extension to the
+        // window edge -- it shapes the line and the band and nothing else, so the three rows
+        // under the plot always line up one-for-one.
+        //
         // opts.timeAxis: position points by timestamp instead of by index. Used by the hourly
         // view, where readings sit at real clock times. The daily view keeps index spacing: each
         // of its points stands for a whole day, not an instant.
@@ -1333,17 +1346,18 @@
             }
 
             // --- X-axis furniture ---
-            // The hourly view gets a true clock axis (Now, +1 h ... +6 h), because its data
-            // points sit at real times. The daily view labels its four day buckets directly.
+            // One tick per reading, anchored to that reading's own x position. Ticks used to be
+            // generated from an independent hourly grid (`t0 + n * 3600`), which placed every
+            // label at a time the data does not occupy: the grid starts at the instant of the
+            // request rather than on a clock boundary, and a zone whose offset is not a whole
+            // hour shifts it again. The tail is skipped because it is not a reading -- it has no
+            // icon to sit above, and its clock label would repeat the preceding hour's.
             const tickItems = [];
-            if (timeAxis) {
-                for (let t = t0; t < t1; t += 3600) {
-                    tickItems.push({ text: t === t0 ? 'Now' : formatHourLabel(t, tz), x: xOfDt(t) });
-                }
-                tickItems.push({ text: formatHourLabel(t1, tz), x: xOfDt(t1) });
-            } else {
-                points.forEach((p, i) => tickItems.push({ text: p.label, x: xAt(i) }));
-            }
+            points.forEach((p, i) => {
+                if (p.tail) return;
+                tickItems.push({ text: p.label, x: xAt(i) });
+            });
+
             const axisTicks = tickItems.map(tick => {
                 const tw = estWidth(tick.text, xFont);
                 const cx = clampX(tick.x, tw);
@@ -1421,31 +1435,31 @@
             };
 
             // --- Dots ---
-            // A derived point (the horizon sample) is drawn hollow and open: interpolation is
-            // fine to show, but the dot says "this reading was calculated, not measured".
             const highColor = '#fcd34d';
             const lowColor  = '#7dd3fc';
             const observedColor = '#ffffff';
             const dotR = tight ? 2.5 : 3;
-            const dot = (x, y, fill, hollow) => hollow
-                ? `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${dotR}" fill="none" stroke="${fill}" stroke-width="1.6" stroke-opacity="0.9"/>`
-                : `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${dotR}" fill="${fill}" stroke="rgba(10,15,30,0.5)" stroke-width="1.5"/>`;
+            const dot = (x, y, fill) =>
+                `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${dotR}" fill="${fill}" stroke="rgba(10,15,30,0.5)" stroke-width="1.5"/>`;
 
             // --- Value labels ---
             // Every label above the curve shares one lane and every label below shares another,
             // so an H: label can never overprint an L: label next to it. On a narrow card the
             // prefixes are dropped: the amber/sky dots already carry that meaning.
             //
-            // Interpolation is NOT a reason to withhold a number, so a derived point prints the
-            // same label as a measured one. Only a genuinely collapsed band prints a single
-            // value, and then it prints no L: at all rather than repeating the number below.
+            // Only a genuinely collapsed band prints a single value, and then it prints no L: at
+            // all rather than repeating the same number below. The tail prints nothing: its
+            // temperature is interpolated toward a reading that is outside the window, so a
+            // number there would be the only figure on the chart that no sample backs.
             const aboveLane = [];
             const belowLane = [];
             let dotsHtml = '';
 
             points.forEach((pt, i) => {
-                const hollow = !!pt.interpolated;
+                if (pt.tail) return;
+
                 const degenerate = isDegenerate(i);
+                const measured = rawHigh[i] !== null && rawLow[i] !== null;
                 const labelGap = valFont + 5;
 
                 // The observation is one reading, not a window: the band starts collapsed on it.
@@ -1458,10 +1472,8 @@
                     return;
                 }
 
-                const measured = rawHigh[i] !== null && rawLow[i] !== null;
-
-                dotsHtml += dot(hPts[i].x, hPts[i].y, highColor, hollow);
-                if (!degenerate) dotsHtml += dot(lPts[i].x, lPts[i].y, lowColor, hollow);
+                dotsHtml += dot(hPts[i].x, hPts[i].y, highColor);
+                if (!degenerate) dotsHtml += dot(lPts[i].x, lPts[i].y, lowColor);
 
                 if (!measured) return;
 
@@ -1510,7 +1522,7 @@
             const iconY = H - iconSize - 1;
             const iconItems = hPts.map((p, i) => ({
                 x: p.x,
-                emoji: condIdToEmoji(points[i].condId)
+                emoji: points[i].tail ? '' : condIdToEmoji(points[i].condId)
             })).filter(it => it.emoji);
 
             const iconGap = iconSize + 2;
@@ -1537,14 +1549,13 @@
             const unit = tempUnitSuffix();
             const described = points
                 .map((p, i) => {
-                    if (tempVals[i] == null) return '';
+                    if (p.tail || tempVals[i] == null) return '';
                     const cond = p.condMain ? `, ${p.condMain.toLowerCase()}` : '';
                     return `${p.label} ${Math.round(tempVals[i])}${unit}${cond}`;
                 })
                 .filter(Boolean)
                 .join(', ');
-            const derivedNote = points.some(p => p.interpolated) ? ' Hollow marks are interpolated.' : '';
-            const ariaLabel = `Temperature trend: ${described}.${derivedNote}`;
+            const ariaLabel = `Temperature trend: ${described}.`;
 
             // The fill and the second stroke only exist when the data has a real envelope.
             const bandLayer = hasBand ? `
