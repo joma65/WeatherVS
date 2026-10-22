@@ -13,7 +13,7 @@ static files served as-is.
 |---|---|
 | `index.html` | The entire application — markup, styles (Tailwind via CDN), all JavaScript, and the inline SVG trend chart. Single file. |
 | `manifest.json` | PWA manifest: app name, `start_url`, standalone display, theme/background colors, icon entries. |
-| `sw.js` | Service worker: pre-caches the app shell and CDN assets, serves navigations network-first and static assets stale-while-revalidate, and clears old cache versions on activate. Cache name is versioned (`weather-compare-v17`). |
+| `sw.js` | Service worker: pre-caches the app shell and CDN assets, serves navigations network-first and static assets stale-while-revalidate, and clears old cache versions on activate. Cache name is versioned (`weather-compare-v20`). |
 | `icon.png` | 512x512 app icon, referenced by `manifest.json`. |
 | `icon-192.png` | 192x192 app icon — a downscale of `icon.png`. Chromium's install criteria want both a 192px and a 512px icon. |
 
@@ -39,9 +39,9 @@ or any static host.
 
 If you change `sw.js` or any asset listed in `ASSETS_TO_CACHE` — in practice that means
 `index.html`, since the chart and all app logic live there — bump `CACHE_NAME`, for example
-`v17` to `v18`. Without the bump, returning visitors keep being served the previous shell, and
+`v20` to `v21`. Without the bump, returning visitors keep being served the previous shell, and
 accepting the update prompt re-loads bytes that did not change. The current version is
-`weather-compare-v17`.
+`weather-compare-v20`.
 
 ## Updating the app — the worker and the page are a pair
 
@@ -121,9 +121,14 @@ server-side.
 ## How the forecast becomes a chart
 
 Each card's back face is a trend chart drawn as an inline SVG (`buildTempChartSVG`). There is no
-chart library and no canvas. The data comes from OpenWeatherMap's 3-hourly forecast endpoint
-(`/data/2.5/forecast?cnt=24`), and the chart has two modes, toggled by the calendar button on
-the back face.
+chart library and no canvas. The data comes from OpenWeatherMap's 3-hourly forecast endpoint,
+and the chart has two modes, toggled by the calendar button on the back face.
+
+The request asks for `cnt=40`, the endpoint's maximum, which is 120 hours. That is deliberately
+more than the daily view needs: it previously asked for 24 (72 hours), which is not always
+enough for four local calendar dates, and how many dates fit depends on the city's UTC offset.
+Two cities compared side by side could therefore show a different number of days, which reads as
+missing data rather than as a windowing artefact.
 
 ### Hourly view: now to now plus six hours
 
@@ -139,17 +144,45 @@ The window width is `HOURLY_WINDOW_HOURS` (6). Its points are:
    bracket it. It is flagged `interpolated` and drawn with a hollow dot, but it prints a normal
    H/L pair. Interpolated numbers are shown and marked, not withheld.
 
-Because the source is 3-hourly, a 6-hour window holds at most two real buckets. Those straight
-segments between real measurements are the interpolation; no synthetic hourly points are
-created. The view is time-proportional, with a real clock axis labelled Now, 5 PM, and so on,
-so a bucket that lands 90 minutes out sits where it actually is.
+Because the source is 3-hourly, a 6-hour window holds at most two real buckets. Those segments
+between real measurements are the interpolation; no synthetic hourly points are created. The
+view is time-proportional, with a real clock axis labelled Now, 5 PM, and so on, so a bucket
+that lands 90 minutes out sits where it actually is.
+
+A leading bucket that is less than 90 minutes away (`IMMINENT_BUCKET_SECONDS`) is excluded from
+the drawn points while still feeding interpolation. Sitting a few pixels from the left edge, it
+would otherwise produce a near-vertical spike out of the observation instead of a trend line.
 
 ### 3-day view
 
-The forecast list is bucketed by local calendar date and reduced to four points: today (labelled
-"Rest of today") plus the next three days, each with its day high, day low, and prevailing
-condition icon. This view is index-spaced, one point per day, spread evenly, because a day is not
-an instant and evening-to-midnight buckets would otherwise bunch up at one end.
+The forecast list is bucketed by local calendar date and reduced to at most four points, each
+with its day high, day low, and prevailing condition icon. Points are labelled by their actual
+local date: the first is called "Rest of today" only when it really is today, which requires
+today to still have forecast samples in it. Late in the evening the next 3-hourly bucket is
+already past local midnight, so today drops out and the first point is labelled with its weekday
+instead. Even when today does survive, the label stops at "Rest of today" rather than "Today":
+an earlier high has already passed and is not in the data, so a full-day envelope is not
+something the numbers support.
+
+This view is index-spaced, one point per day, spread evenly, because a day is not an instant and
+evening-to-midnight buckets would otherwise bunch up at one end.
+
+### How the curves are drawn
+
+The high and low lines are monotone cubic Hermite splines with Fritsch-Carlson tangents, emitted
+as cubic Beziers. A straight segment between two buckets asserts a constant rate of change across
+those hours, which the data does not say, and the kinks at each bucket are noise rather than
+signal.
+
+The tangent rule matters. Catmull-Rom and natural cubic splines overshoot near local extrema, so
+a drawn peak could sit above the warmest measured high and a trough below the coldest measured
+low — the chart would state a temperature nobody observed. Fritsch-Carlson limits each tangent to
+three times its adjacent secant, which keeps the curve inside the envelope of its own data, keeps
+it loop-free (x is time and must never double back), and still leaves it C1 smooth.
+
+Dots and value labels stay pinned to the real data points. Smoothing changes the shape of the
+line between measurements without moving a single reading, and the band's return edge is the same
+spline run backwards, which is valid because the tangent calculation is symmetric under reversal.
 
 ### Rules the chart code depends on
 
@@ -170,6 +203,9 @@ These are load-bearing. Simplify them and the picture silently goes wrong.
   below shares another, thinned by available pixel width. The bottom padding reserves the
   x-axis tick row and the below-lane label height, so a low label on a flat series is not
   overprinted by the hour mark.
+- Date keys are zero-padded. Local date buckets sort as strings, and the unpadded form puts
+  `2026-9-30` after `2026-10-25` because `9` sorts above `1` — a bug that appears once a year
+  and is then impossible to reproduce.
 - The chart is `role="img"` with a data-carrying label. Label thinning is a visual compromise,
   so the `aria-label` enumerates each time and rounded value, and notes that hollow marks are
   interpolated.
@@ -178,14 +214,6 @@ These are load-bearing. Simplify them and the picture silently goes wrong.
 
 Tracked work lives in the project backlog. This is the state of the rough edges as found.
 
-- The daily view can promise a fourth day it does not have. The forecast request uses `cnt=24`,
-  which is 72 hours, while four day-buckets can span up to 96. The trailing day may therefore
-  hold only a partial morning, understating its high and low. Raising `cnt` to 32 or 40 is the
-  fix; it has not been done.
-- The first daily label is chosen by position, not by date. `buildDailyTemps` labels the first
-  surviving bucket "Rest of today" on the assumption that it is today. Late in the evening the
-  first bucket with samples can already be tomorrow, and tomorrow gets labelled as today. It
-  should compare against today's local date key instead of testing the index.
 - Icon rendering is not failure-tolerant. `lucide.createIcons()` is called unguarded on several
   paths, one of which runs during startup from `updateKeyStatus()`. The update-prompt code uses
   the guarded `if (window.lucide)` form; the other call sites do not, so a blocked or failed CDN
@@ -194,9 +222,13 @@ Tracked work lives in the project backlog. This is the state of the rough edges 
   activating on its own, so a visitor who never accepts keeps running the version they already
   had. That is intentional, but it does mean updates are not automatic.
 - There are no automated tests. The chart math is pure functions (`buildHourlyTemps`,
-  `buildDailyTemps`, `buildTempChartSVG`) over plain objects, so a static harness that stubs
-  `fetch` with a captured API response could assert point counts, which points are interpolated,
-  and that labels exist for every point without needing a live key. Nothing like that exists yet.
+  `buildDailyTemps`, `buildTempChartSVG`, `monotoneTangents`) over plain objects, so a static
+  harness that stubs `fetch` with a captured API response could assert point counts, which
+  points are interpolated, that the spline never leaves its data envelope, and that labels exist
+  for every point without needing a live key. Nothing like that exists yet.
+- The 3-day subtitle is a fixed string. In the late-evening case where today has no forecast
+  samples, four points are drawn covering tomorrow onward and the header still reads "Next 3
+  days". The label should be derived from the points that were actually produced.
 - Installability is unverified in a real browser. `manifest.json` declares both a 192px and a
   512px icon, which is what Chromium asks for, but nobody has confirmed in Chrome that the
   install affordance appears and that DevTools shows the app as installable. Treat install
@@ -219,7 +251,10 @@ you bump it, and never reuse a name.
 
 | Version | Change |
 |---|---|
-| `v17` | Chart: the observation band collapsed back onto the current reading, so the shaded region starts from a single point at "Now". Bottom padding now reserves the below-lane label height on top of the tick row, so the right-most low label clears the hour mark. |
+| `v20` | Daily view: forecast request raised to `cnt=40` so four local calendar dates are available at any hour in any timezone, and the first point is labelled by its real local date instead of by position. Local date keys zero-padded so they sort across a single-digit month. |
+| `v19` | Trend lines drawn as monotone cubic splines with Fritsch-Carlson tangents, so peaks and troughs cannot overshoot the measured values. Dots and labels stay on the real data points. |
+| `v18` | A leading forecast bucket under 90 minutes away is no longer plotted, removing the near-vertical spike at the left edge. It still feeds interpolation. |
+| `v17` | Chart: the observation band collapsed back onto the current reading, so the shaded region starts from a single point at "Now". Bottom padding reserves the below-lane label height on top of the tick row, so the right-most low label clears the hour mark. |
 | `v16` | Chart: attempt at an extrapolated band at the observation plus a reserved below-lane offset. Superseded by v17; the borrowed envelope drew a flat left segment that kinked at the first bucket. |
 | `v15` | Chart: collapse detection and minimum plot span computed in source Celsius, so unit toggles no longer change labels or plot height. Interpolated points print a full H/L pair. |
 | `v14` | Fixed the hourly chart rendering nothing. An interpolation helper read fields off numbers and returned undefined, making the chart domain NaN and mapping every point outside the viewBox. |

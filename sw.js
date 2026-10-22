@@ -1,3 +1,21 @@
+// v20: two daily-view defects. The forecast request now asks for the endpoint's maximum of 40
+// buckets (5 days) instead of 24 (72 hours): a late-evening request leaves too few hours for
+// four LOCAL calendar dates, and how many fit depends on the city's UTC offset, so two cities
+// side by side could show a different number of days. The first daily point is also labelled by
+// its actual local date rather than by position -- at night the first bucket with samples is
+// already tomorrow, and it was being called "Rest of today". Local date keys are zero-padded so
+// they still sort across a single-digit month.
+//
+// v19: the trend lines are drawn as monotone cubic splines instead of straight segments.
+// Fritsch-Carlson tangents are used rather than Catmull-Rom or a natural cubic, because both
+// of those overshoot at local extrema and would draw a peak warmer than any measured high.
+// Dots and labels stay pinned to the real data points, so smoothing changes the shape of the
+// line without moving a single reading.
+//
+// v18: an imminent leading forecast bucket (under 90 minutes out) is no longer plotted. It
+// still feeds interpolation, so the visible line runs from "Now" to the bucket after it
+// instead of spiking near-vertically at the left edge.
+//
 // v17: two chart corrections. The observation point is collapsed onto the current reading
 // again (high == low == temp) so the band starts from a single place at "Now" -- the v16
 // borrowed envelope drew a flat segment across the left edge and then kinked. The bottom
@@ -40,7 +58,7 @@
 // network-first navigations from stale-while-revalidate assets (#2); v8 replaced
 // cache.addAll() with per-asset add (#1a). v7 and older served everything cache-first and
 // aborted install on any failed asset.
-const CACHE_NAME = 'weather-compare-v17';
+const CACHE_NAME = 'weather-compare-v20';
 const ASSETS_TO_CACHE = [
   './',
 './index.html',

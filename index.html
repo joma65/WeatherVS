@@ -515,6 +515,16 @@
             }
         }
 
+        // The forecast endpoint's maximum. Each entry is 3 hours, so this is 5 days.
+        //
+        // This used to be 24 (72 hours), which is not enough to guarantee four daily buckets.
+        // A late-evening request has already burned part of today, and how many LOCAL calendar
+        // dates fit in the remaining window depends on the city's UTC offset -- two cities
+        // compared side by side could therefore show a different number of days, which reads as
+        // missing data rather than as a windowing artefact. Requesting the full 120 hours makes
+        // four dates available in every timezone at any hour.
+        const FORECAST_BUCKETS = 40;
+
         async function fetchWeather(city) {
             // The key is user-supplied and may contain characters that are unsafe in a query
             // string, so it is encoded like any other untrusted value. This does not hide the
@@ -522,7 +532,7 @@
             // that is what the plaintext-storage warning in the key modal is about.
             const query = `q=${encodeURIComponent(city)}&appid=${encodeURIComponent(apiKey)}&units=metric`;
             const currentUrl = `https://api.openweathermap.org/data/2.5/weather?${query}`;
-            const forecastUrl = `https://api.openweathermap.org/data/2.5/forecast?${query}&cnt=24`;
+            const forecastUrl = `https://api.openweathermap.org/data/2.5/forecast?${query}&cnt=${FORECAST_BUCKETS}`;
             let currentRes, forecastRes;
             try {
                 // The forecast is optional: if it fails or times out we degrade to a
@@ -583,6 +593,14 @@
         // stay honest about which readings were measured and which were interpolated.
         const HOURLY_WINDOW_HOURS = 6;
 
+        // A bucket that lands almost immediately after "now" is drawn only a few pixels from the
+        // left edge, so the segment rising out of the observation is near-vertical: a spike, not
+        // a trend. When the next bucket is this close it is kept for interpolation but is NOT
+        // plotted -- the visible line runs from the observation straight to the bucket after it,
+        // which is the same slope the two buckets describe, drawn once instead of twice.
+        // 90 minutes is half a 3-hourly bucket. The number is in seconds to match the API.
+        const IMMINENT_BUCKET_SECONDS = 90 * 60;
+
         function buildHourlyTemps(current, forecast) {
             const now = Math.floor(Date.now() / 1000);
             const t0 = now;
@@ -626,6 +644,16 @@
             const nowTempC = typeof current?.main?.temp === 'number' ? current.main.temp : samples[0].tempC;
             const tz = current?.timezone;
 
+            const inWindow = samples.filter(b => b.dt > t0 && b.dt <= t1);
+
+            // Drop an imminent leading bucket from the PLOTTED set only. It stays in `samples`,
+            // so it still shapes the interpolated closing sample on the right edge. The guard on
+            // length keeps at least one real bucket to aim at: if the imminent bucket is the only
+            // one in the window there is nothing smoother to draw, so the spike is the honest
+            // picture and it is left alone rather than being replaced by a lone observation.
+            const dropLeading = inWindow.length > 1 && (inWindow[0].dt - t0) < IMMINENT_BUCKET_SECONDS;
+            const plotSamples = dropLeading ? inWindow.slice(1) : inWindow;
+
             // "Now" is a single reading, not a window: the 2.5 /weather endpoint reports one
             // temperature and no meaningful spread. The band therefore starts collapsed on that
             // reading and fans out to the first forecast window. Giving it a borrowed envelope
@@ -642,8 +670,7 @@
                 observed: true
             }];
 
-            samples.forEach(b => {
-                if (b.dt <= t0 || b.dt > t1) return;
+            plotSamples.forEach(b => {
                 points.push({
                     dt: b.dt,
                     tempC: b.tempC,
@@ -682,7 +709,18 @@
             return `${hour} ${meridiem}`;
         }
 
-        // 3-hourly forecast list -> 4 points: Today + next 3 days
+        // A sortable local-date key. Month and day are zero-padded: the unpadded form compares
+        // as a string, where "2026-9-30" sorts AFTER "2026-10-25" because '9' > '1'. That only
+        // bites when the window crosses a single-digit month, which makes it a bug that appears
+        // once a year and is then impossible to reproduce -- so it is padded from the start.
+        function localDateKey(dt, timezoneOffset) {
+            const local = new Date((dt + (timezoneOffset || 0)) * 1000);
+            const month = String(local.getUTCMonth() + 1).padStart(2, '0');
+            const day = String(local.getUTCDate()).padStart(2, '0');
+            return `${local.getUTCFullYear()}-${month}-${day}`;
+        }
+
+        // 3-hourly forecast list -> up to 4 points: today (or the first day with data) + 3 more.
         // Each point carries daily high, low, and prevailing weather condition.
         function buildDailyTemps(current, forecastList) {
             const tz = current.timezone || 0;
@@ -690,8 +728,7 @@
 
             forecastList.forEach(item => {
                 if (!item || !item.main || typeof item.main.temp !== 'number') return;
-                const localDate = new Date((item.dt + tz) * 1000);
-                const key = `${localDate.getUTCFullYear()}-${localDate.getUTCMonth()}-${localDate.getUTCDate()}`;
+                const key = localDateKey(item.dt, tz);
                 if (!buckets[key]) buckets[key] = { highs: [], lows: [], dt: item.dt, condTally: {} };
                 // Use temp_min / temp_max if available, otherwise temp itself
                 buckets[key].highs.push(item.main.temp_max ?? item.main.temp);
@@ -708,8 +745,7 @@
             // unreliable for cities. They must never enter the high/low sets: the daily envelope
             // comes from the forecast buckets alone, so there is exactly one source of truth.
             const nowDt = Math.floor(Date.now() / 1000);
-            const todayLocal = new Date((nowDt + tz) * 1000);
-            const todayKey = `${todayLocal.getUTCFullYear()}-${todayLocal.getUTCMonth()}-${todayLocal.getUTCDate()}`;
+            const todayKey = localDateKey(nowDt, tz);
             if (!buckets[todayKey]) buckets[todayKey] = { highs: [], lows: [], dt: nowDt, condTally: {} };
             if (current.weather?.[0]) {
                 const id = current.weather[0].id;
@@ -728,16 +764,23 @@
             // than dressing the observation's temp_min/temp_max up as a daily envelope.
             if (!days.length) return [];
 
-            return days.map((key, idx) => {
+            return days.map(key => {
                 const b = buckets[key];
                 const highC = Math.max(...b.highs);
                 const lowC  = Math.min(...b.lows);
                 const tempC = (highC + lowC) / 2;
-                // The forecast request uses cnt=24, which covers now-onward only. Today's bucket
-                // therefore holds the REST of today, not the whole day: an earlier high that has
-                // already passed is not in the data. Labelling it "Today" claimed a full-day
-                // envelope the numbers do not support, so it says what it actually is.
-                const label = idx === 0 ? 'Rest of today' : new Date((b.dt + tz) * 1000).toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' });
+
+                // Label by DATE, not by position. The first surviving bucket is only today if
+                // today still has forecast samples left in it; late in the evening the next
+                // 3-hourly bucket is already past local midnight, today's bucket holds no
+                // samples and is filtered out above, and a positional label called tomorrow
+                // "Rest of today". Even when today does survive, it is still only the REST of
+                // today: an earlier high has already passed and is not in the data, so the
+                // label must not claim a full-day envelope.
+                const label = key === todayKey
+                    ? 'Rest of today'
+                    : new Date((b.dt + tz) * 1000).toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' });
+
                 const tally = b.condTally;
                 const condId = Object.keys(tally).length
                     ? Number(Object.keys(tally).reduce((a, c) => tally[a] > tally[c] ? a : c))
@@ -779,6 +822,73 @@
             if (id === 802)            return '⛅';         // Scattered clouds
             if (id >= 803)             return '☁\uFE0F';   // Broken/overcast clouds
             return '';
+        }
+
+        // --- Spline geometry: a smooth curve through the data points ---
+        // The plot is drawn as a curve, not a polyline. A straight segment between two buckets
+        // asserts a constant rate of change across those hours, which the data does not say, and
+        // the kinks at each bucket are noise rather than signal.
+        //
+        // The interpolant is a monotone cubic Hermite spline with Fritsch-Carlson tangents, not a
+        // Catmull-Rom or a natural cubic. Both of those overshoot near local extrema, so a drawn
+        // peak could sit above the warmest measured high and a trough below the coldest measured
+        // low -- the chart would state a temperature nobody observed. Fritsch-Carlson limits each
+        // tangent to three times its adjacent secant, which keeps the curve inside the envelope of
+        // its own data, keeps it free of loops (x is time and must never double back), and is
+        // still C1 smooth. It is also symmetric under reversal, which is what lets the band's
+        // return edge reuse the same tangents.
+        function monotoneTangents(pts) {
+            const n = pts.length;
+            if (n < 2) return new Array(n).fill(0);
+
+            const secant = new Array(n - 1);
+            for (let i = 0; i < n - 1; i++) {
+                const dx = pts[i + 1].x - pts[i].x;
+                secant[i] = dx === 0 ? 0 : (pts[i + 1].y - pts[i].y) / dx;
+            }
+
+            const m = new Array(n);
+            m[0] = secant[0];
+            m[n - 1] = secant[n - 2];
+            for (let i = 1; i < n - 1; i++) {
+                // Flat segment on either side means a true local extremum: slope zero, not a
+                // blend, or the curve would round it off and invent a value past the data point.
+                m[i] = (secant[i - 1] * secant[i] <= 0) ? 0 : (secant[i - 1] + secant[i]) / 2;
+            }
+
+            for (let i = 0; i < n - 1; i++) {
+                if (secant[i] === 0) { m[i] = 0; m[i + 1] = 0; continue; }
+                const a = m[i] / secant[i];
+                const b = m[i + 1] / secant[i];
+                const s = a * a + b * b;
+                if (s > 9) {
+                    const t = 3 / Math.sqrt(s);
+                    m[i] = t * a * secant[i];
+                    m[i + 1] = t * b * secant[i];
+                }
+            }
+            return m;
+        }
+
+        // Emit the curve as cubic Beziers. `lead` is the command that opens the subpath: 'M' for
+        // a fresh line, 'L' when continuing from another curve (the band's return edge).
+        function splinePath(pts, lead) {
+            if (!pts.length) return '';
+            const f = v => v.toFixed(1);
+            let out = `${lead} ${f(pts[0].x)} ${f(pts[0].y)}`;
+            if (pts.length === 1) return out;
+
+            const m = monotoneTangents(pts);
+            for (let i = 0; i < pts.length - 1; i++) {
+                const p = pts[i], q = pts[i + 1];
+                const third = (q.x - p.x) / 3;
+                // Control points sit a third of the span out, aimed along each endpoint's tangent,
+                // which is the standard Hermite-to-Bezier conversion.
+                const c1x = p.x + third, c1y = p.y + m[i] * third;
+                const c2x = q.x - third, c2y = q.y - m[i + 1] * third;
+                out += ` C ${f(c1x)} ${f(c1y)}, ${f(c2x)} ${f(c2y)}, ${f(q.x)} ${f(q.y)}`;
+            }
+            return out;
         }
 
         // --- Inline SVG line chart (no external chart library) ---
@@ -947,10 +1057,13 @@
             const hPts = highVals.map((v, i) => ({ x: xAt(i), y: toY(v) }));
             const lPts = lowVals.map( (v, i) => ({ x: xAt(i), y: toY(v) }));
 
-            const pathD = pts => `M ${pts.map(p => `${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' L ')}`;
-
-            // Band fill: high line forward + low line backward
-            const bandPath = `${pathD(hPts)} L ${[...lPts].reverse().map(p => `${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' L ')} Z`;
+            // The band is the same two curves, traced out and back: high from left to right, then
+            // low from right to left. Reversing the low points and running the same spline yields
+            // the identical curve travelled backwards, because the tangent calculation is
+            // symmetric under reversal -- no separate reverse-interpolation code needed.
+            const highPath = splinePath(hPts, 'M');
+            const lowPath = splinePath(lPts, 'M');
+            const bandPath = `${highPath} ${splinePath([...lPts].reverse(), 'L')} Z`;
 
             // Grid lines
             const grid = [0, 0.25, 0.5, 0.75, 1].map(r => {
@@ -1080,8 +1193,8 @@
                 </defs>
                 ${grid}
                 <path d="${bandPath}" fill="url(#${gradientId}-band)"/>
-                <path d="${pathD(hPts)}" fill="none" stroke="${highColor}" stroke-width="${tight ? 1.8 : 2.2}" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
-                <path d="${pathD(lPts)}" fill="none" stroke="${lowColor}" stroke-width="${tight ? 1.8 : 2.2}" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
+                <path d="${highPath}" fill="none" stroke="${highColor}" stroke-width="${tight ? 1.8 : 2.2}" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
+                <path d="${lowPath}" fill="none" stroke="${lowColor}" stroke-width="${tight ? 1.8 : 2.2}" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
                 ${dotsHtml}
                 ${valueLabels}
                 ${xLabels}
