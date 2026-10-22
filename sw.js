@@ -1,9 +1,14 @@
+// v31: two temperature references drawn on the chart -- freezing (0 °C / 32 °F, saturated blue)
+// and a warm-room reference (24 °C / 75 °F, orange). Both are stated in source Celsius, like the
+// domain, so they sit at the same physical height in either unit. They are drawn after the grid
+// and before the band and curves, so the data stays primary, and a reference outside the visible
+// domain is skipped rather than clamped to the frame edge.
+//
 // v30: the chart's vertical scale is fixed at 0-100 °F (stated in source Celsius, so both units
 // draw identical geometry) instead of being fitted to the data. A fitted domain made small
 // changes look significant and, worse, gave each card its own invisible scale, so two cards
 // side by side could not actually be compared. The band widens to include readings outside it
-// plus a margin, and a series lying entirely outside the band is fitted instead -- a fixed band
-// there would squash the line into a sliver.
+// plus a margin, and a series lying entirely outside the band is fitted instead.
 //
 // v29: the hourly window is anchored to the top of the current hour and the observation is
 // pinned to slot 0, so positions are fixed for the whole hour: no label drift, no crowding, no
@@ -67,7 +72,7 @@
 // network-first navigations from stale-while-revalidate assets (#2); v8 replaced
 // cache.addAll() with per-asset add (#1a). v7 and older served everything cache-first and
 // aborted install on any failed asset.
-const CACHE_NAME = 'weather-compare-v30';
+const CACHE_NAME = 'weather-compare-v31';
 const ASSETS_TO_CACHE = [
   './',
 './index.html',
