@@ -1371,25 +1371,29 @@
             }
 
             // --- Bottom padding ---
-            // Up to three bands can live under the plot: the x-axis ticks, the below-lane value
-            // labels that hang just beneath the plot floor, and the condition icon row. Each must
-            // be reserved. Reserving only a label's OFFSET once left the labels overlapping the
-            // tick row, so on a flat series -- where the low dot sits exactly on the plot floor --
-            // the right-most L: label was drawn into the tick row and overprinted by the hour
-            // mark. The label's own text height is part of the reservation now.
+            // Up to four things can live beneath the plot, and each must be reserved or it gets
+            // drawn on top of the next one: the lowest dot's own radius, the below-lane value
+            // labels that hang from the plot floor, the x-axis tick row, and the icon row.
+            //
+            // The dot's clearance is not optional. A dot is drawn AROUND its centre, so a series
+            // whose minimum lands on the floor -- which is the normal case, since the scale is
+            // built from the data's own min and max -- has its lower half reaching into whatever
+            // comes next. With a band, the below-lane L: label occupies that space and the
+            // clearance is already implied by its offset. Without a band there is nothing
+            // between the floor and the tick row, and the dot was printing over the hour beneath
+            // it. Reserving it explicitly fixes that for both cases without double-counting.
             const tickBlock = xFont + 6
                 + Math.max(0, labelRows.length - 1) * (xFont + 5)
                 + (hasCondIcons ? iconSize + 4 : 0);
             const valueLabelOffset = valFont + 5;              // floor -> label baseline
             const valueLabelBlock = valueLabelOffset + valFont + 4; // baseline -> descender + gap
+            const dotClearance = tight ? 9 : 10;               // floor -> tick row, no band only
 
             const pad = {
                 top: tight ? 28 : 36,
                 right: padRight,
                 left: padLeft,
-                // A single-line series prints nothing below the curve, so the below-lane band is
-                // only reserved when there is a band to label.
-                bottom: tickBlock + (hasBand ? valueLabelBlock : 0)
+                bottom: tickBlock + (hasBand ? valueLabelBlock : dotClearance)
             };
 
             const availH = H - pad.top - pad.bottom;
