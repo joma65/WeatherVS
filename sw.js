@@ -1,11 +1,14 @@
-// v29: the hourly window is anchored to the top of the current hour instead of to the exact
-// instant of the request, and the observation is pinned to slot 0. Anchoring to `now` made every
-// position a function of the wall clock: the first bucket slid from a full slot down to a couple
-// of pixels, crowding its label against "Now" until one was thinned away, while the last bucket
-// pulled in from the right edge and opened a widening unlabelled gap. Positions are now fixed
-// fractions of the width for the whole hour. Pinning the observation to slot 0 also means the
-// first segment always spans a slot, which removes the near-vertical spike -- so the
-// imminent-bucket filters (5 min / 90 min) are gone and no forecast hour is ever dropped.
+// v30: the chart's vertical scale is fixed at 0-100 °F (stated in source Celsius, so both units
+// draw identical geometry) instead of being fitted to the data. A fitted domain made small
+// changes look significant and, worse, gave each card its own invisible scale, so two cards
+// side by side could not actually be compared. The band widens to include readings outside it
+// plus a margin, and a series lying entirely outside the band is fitted instead -- a fixed band
+// there would squash the line into a sliver.
+//
+// v29: the hourly window is anchored to the top of the current hour and the observation is
+// pinned to slot 0, so positions are fixed for the whole hour: no label drift, no crowding, no
+// lost hour. The imminent-bucket filters are gone, because slot spacing prevents the spike they
+// existed to hide.
 //
 // v28: the compiled tailwind.css is precached, and index.html loads it LAST in <head>. Loading it
 // before the inline <style> let the .flip-toggle reset win on equal specificity, darkening every
@@ -48,8 +51,8 @@
 //
 // v16: chart geometry fixes. Superseded by v17; the borrowed envelope drew a flat left segment.
 //
-// v15: collapse detection and minimum plot span computed in source Celsius, so unit toggles no
-// longer change labels or plot height.
+// v15: collapse detection and plot span computed in source Celsius, so unit toggles no longer
+// change labels or plot height.
 //
 // v14: fixed the hourly chart rendering nothing. An interpolation helper read fields off numbers
 // and returned undefined, making the chart domain NaN.
@@ -64,7 +67,7 @@
 // network-first navigations from stale-while-revalidate assets (#2); v8 replaced
 // cache.addAll() with per-asset add (#1a). v7 and older served everything cache-first and
 // aborted install on any failed asset.
-const CACHE_NAME = 'weather-compare-v29';
+const CACHE_NAME = 'weather-compare-v30';
 const ASSETS_TO_CACHE = [
   './',
 './index.html',
