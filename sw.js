@@ -1,103 +1,77 @@
-// v26: the plot floor now clears the lowest dot. A dot is drawn around its centre, so a series
-// whose minimum lands on the floor -- the normal case, since the scale is built from the data's
-// own min and max -- had its lower half reaching into the x-axis tick row and printing over the
-// hour label beneath it. Only the below-lane value label reserved that space, and the hourly
-// One Call view has no band, so nothing did. index.html changed, so the cache moves.
+// v29: the hourly window is anchored to the top of the current hour instead of to the exact
+// instant of the request, and the observation is pinned to slot 0. Anchoring to `now` made every
+// position a function of the wall clock: the first bucket slid from a full slot down to a couple
+// of pixels, crowding its label against "Now" until one was thinned away, while the last bucket
+// pulled in from the right edge and opened a widening unlabelled gap. Positions are now fixed
+// fractions of the width for the whole hour. Pinning the observation to slot 0 also means the
+// first segment always spans a slot, which removes the near-vertical spike -- so the
+// imminent-bucket filters (5 min / 90 min) are gone and no forecast hour is ever dropped.
 //
-// v25: the window-edge sample is geometry only. It stretches the line and the band to the
-// six-hour mark with no dot, value label, clock label or icon, so dots, labels and icons are
-// one-per-reading. Clock labels also print minutes when the city's UTC offset is not a whole
-// hour (Newfoundland is -2:30 in summer), where "8 AM" was labelling an 8:30 sample.
+// v28: the compiled tailwind.css is precached, and index.html loads it LAST in <head>. Loading it
+// before the inline <style> let the .flip-toggle reset win on equal specificity, darkening every
+// flip button and stripping its padding and separator.
+//
+// v27: tailwind.css added to the shell; the CDN script removed (it is not production-safe and
+// warns on every load). Superseded by v28, which fixed the stylesheet's position.
+//
+// v26: the plot floor clears the lowest dot. Bottom padding reserves the dot's radius when a
+// series has no band, where before only the below-lane value label reserved that space -- and
+// the hourly One Call view has no band, so the lowest dot printed over the clock label.
+//
+// v25: the window-edge sample is geometry only. It stretches the line and the band with no dot,
+// value label, clock label or icon, so dots, labels and icons are one-per-reading. Clock labels
+// also print minutes when the city's UTC offset is not a whole hour.
 //
 // v24: x-axis ticks anchored to the data points instead of an independent hourly grid.
-// Generating them from `t0 + n * 3600` put every label a few pixels away from the icon beneath
-// it and put the right-most tick on a sample that carries no condition.
 //
 // v23: One Call gained a fallback. A key One Call refuses with 401/403 drops to the free 2.5
-// pair -- /weather plus 3-hourly /forecast -- instead of failing the comparison. Both sources
-// normalise to one record; the downgrade is announced on the card with a Retry action and
-// remembered per key so it is not re-probed every comparison.
+// pair -- /weather plus 3-hourly /forecast -- instead of failing the comparison.
 //
-// v22: expected weather per hour. One Call's hourly entries carry a weather[] array, which
-// buildHourlyTemps was dropping. Each hourly point now carries its condition id, so the chart's
-// existing icon row renders in the hourly view as well as the daily one. The icon row is thinned
-// by pixel spacing, because four daily points always fit but seven hourly ones do not on a
-// narrow card.
+// v22: expected weather per hour. Hourly points carry their condition id, so the icon row
+// renders in both views; it thins by pixel spacing on narrow cards.
 //
-// v21: data source moved from the free 3-hourly /data/2.5/forecast endpoint to One Call 3.0.
-// The hourly view became real hourly readings instead of interpolation between 3-hourly
-// buckets. One Call reports one temp per hour with no min/max, so the hourly view drops the
-// shaded band and draws a single measured line; the band remains in the 3-day view, where the
-// daily block carries a real per-day envelope. Cities are geocoded first, since One Call is
-// keyed by coordinate.
+// v21: data source moved to One Call 3.0. Hourly view is real hourly readings; the shaded band
+// is daily-view only, because the hourly block carries no min/max. Cities are geocoded first.
 //
-// v20: two daily-view defects. The forecast request now asks for the endpoint's maximum of 40
-// buckets (5 days) instead of 24 (72 hours): a late-evening request leaves too few hours for
-// four LOCAL calendar dates, and how many fit depends on the city's UTC offset, so two cities
-// side by side could show a different number of days. The first daily point is also labelled by
-// its actual local date rather than by position. Local date keys are zero-padded so they still
-// sort across a single-digit month.
+// v20: daily view fix. The forecast request asks for the endpoint maximum so four local calendar
+// dates are available in any timezone, and the first point is labelled by its real local date.
 //
-// v19: the trend lines are drawn as monotone cubic splines instead of straight segments.
-// Fritsch-Carlson tangents are used rather than Catmull-Rom or a natural cubic, because both
-// of those overshoot at local extrema and would draw a peak warmer than any measured high.
-// Dots and labels stay pinned to the real data points, so smoothing changes the shape of the
-// line without moving a single reading.
+// v19: trend lines drawn as monotone cubic splines with Fritsch-Carlson tangents, so peaks and
+// troughs cannot overshoot the measured values.
 //
-// v18: an imminent leading forecast bucket (under 90 minutes out) is no longer plotted. It
-// still feeds interpolation, so the visible line runs from "Now" to the bucket after it
-// instead of spiking near-vertically at the left edge.
+// v18: an imminent leading forecast bucket is no longer plotted, which removed the near-vertical
+// spike at the left edge. Obsolete as of v29, where slot spacing prevents the spike structurally.
 //
-// v17: two chart corrections. The observation point is collapsed onto the current reading
-// again (high == low == temp) so the band starts from a single place at "Now" -- the v16
-// borrowed envelope drew a flat segment across the left edge and then kinked. The bottom
-// padding now reserves the below-lane value label's full height on top of the x-axis tick
-// block, instead of only its offset, so the right-most L: label clears the hour mark.
+// v17: chart corrections. The observation band collapses onto the current reading, and the
+// bottom padding reserves the below-lane label height so the right-most low label clears the
+// hour mark.
 //
-// v16: chart geometry fixes. The observation now carries an extrapolated band so the shaded
-// region no longer pinches to zero width at the left edge and snaps open at the first bucket
-// (the vertical spike), and the observation is drawn as one measured marker instead of an
-// H:/L: pair. The plot's bottom padding now reserves the below-lane label band as well as the
-// x-axis ticks, so the right-most L: label is no longer overprinted by the hour mark.
+// v16: chart geometry fixes. Superseded by v17; the borrowed envelope drew a flat left segment.
 //
-// v15: unit-toggle defects in the trend chart. Collapse detection and the minimum plot span
-// were both computed from converted values, so the same data printed one label in °C and two
-// in °F, and the card's plot grew ~1.8x taller in °F. Both are now expressed in source °C.
-// Interpolated points also print a full H:/L: pair -- withholding them dropped the closing
-// point's low entirely.
+// v15: collapse detection and minimum plot span computed in source Celsius, so unit toggles no
+// longer change labels or plot height.
 //
-// v14: fixes the hourly trend rendering nothing. buildHourlyTemps() read .dt/.v off numbers
-// produced by a value-only selector, so its interpolation returned undefined, the chart
-// domain became NaN, and every point was mapped outside the viewBox.
+// v14: fixed the hourly chart rendering nothing. An interpolation helper read fields off numbers
+// and returned undefined, making the chart domain NaN.
 //
-// v13: hourly trend rebuilt around real forecast timestamps. The chart used to synthesize 7
-// hourly points, match them against the 3-hourly forecast grid by exact timestamp equality,
-// fail to match, and suppress the value labels -- so only "Now" ever printed a temperature.
+// v13: hourly trend rebuilt around real forecast timestamps.
 //
-// v12: lucide pinned to an exact version AND a full file path (#1b). The precached URL
-// changed, so the cache name moves with it -- a worker installing into the existing name
-// would treat the old lucide entry as present and skip fetching the new one.
-//
-// Why a deep path and not just a pinned version: unpkg answers a bare package URL with a
-// redirect, and the Cache API treats a redirected response as a failed request.
-//   https://unpkg.com/lucide@latest                        -> 302
-//   https://unpkg.com/lucide@1.61.0                        -> 301 (still redirects)
-//   https://unpkg.com/lucide@1.61.0/dist/umd/lucide.min.js -> 200 (clean)
-// Pinning the version alone would leave the precache still failing, while looking fixed.
-// Do not "tidy" this back to a short URL.
+// v12: lucide pinned to an exact version AND a full file path. The short package URL still
+// answers with a redirect, and the Cache API treats a redirected response as a failed request,
+// so only the deep /dist/umd/lucide.min.js path returns a clean 200.
 //
 // Earlier versions: v11 added icon-192.png (#10a); v10 added icon.png (#38); v9 split
 // network-first navigations from stale-while-revalidate assets (#2); v8 replaced
 // cache.addAll() with per-asset add (#1a). v7 and older served everything cache-first and
 // aborted install on any failed asset.
-const CACHE_NAME = 'weather-compare-v26';
+const CACHE_NAME = 'weather-compare-v29';
 const ASSETS_TO_CACHE = [
   './',
 './index.html',
+'./tailwind.css',
 './manifest.json',
 './icon.png',
 './icon-192.png',
-'https://cdn.tailwindcss.com',
 'https://unpkg.com/lucide@1.61.0/dist/umd/lucide.min.js'
 ];
 
@@ -148,10 +122,10 @@ self.addEventListener('install', (event) => {
       console.log('[Service Worker] Caching app shell and content');
       return Promise.all(
         ASSETS_TO_CACHE.map((asset) =>
-        cache.add(asset).catch((error) => {
-          // One unavailable asset must not fail the install.
-          console.warn('[Service Worker] Failed to cache:', asset, error);
-        })
+          cache.add(asset).catch((error) => {
+            // One unavailable asset must not fail the install.
+            console.warn('[Service Worker] Failed to cache:', asset, error);
+          })
         )
       );
     })
@@ -191,13 +165,13 @@ async function staleWhileRevalidate(request) {
   const cache = await caches.open(CACHE_NAME);
   const cached = await cache.match(request, MATCH_OPTIONS);
   const network = fetch(request)
-  .then((response) => {
-    if (isCacheable(response)) {
-      cache.put(request, response.clone());
-    }
-    return response;
-  })
-  .catch(() => null);
+    .then((response) => {
+      if (isCacheable(response)) {
+        cache.put(request, response.clone());
+      }
+      return response;
+    })
+    .catch(() => null);
   return cached || (await network) || Response.error();
 }
 
