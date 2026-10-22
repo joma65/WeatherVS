@@ -1463,6 +1463,34 @@
                 return `<line x1="${pad.left}" y1="${y}" x2="${W - pad.right}" y2="${y}" stroke="rgba(255,255,255,0.15)" stroke-width="1" stroke-dasharray="3 4"/>`;
             }).join('');
 
+            // --- Temperature references ---
+            // Two fixed temperatures worth seeing at a glance: freezing (0 °C / 32 °F) and a
+            // warm-room reference (24 °C / ~75 °F). Both are stated in source Celsius, like the
+            // domain, so they land at the same physical height in either unit -- and because the
+            // domain is fixed, the same height on both cards and in both modes.
+            //
+            // They sit after the grid and BEFORE the band and curves. The fill is only 25%
+            // opaque, so a dashed line beneath it still reads, while the data stays the most
+            // prominent thing on the card. A reference outside the visible domain is skipped
+            // rather than clamped to the frame edge: a line pinned to the border would read as an
+            // axis rather than as a temperature.
+            //
+            // Colours are chosen to be distinguishable from the series themselves -- the low
+            // curve is pale sky (#7dd3fc) and the high curve is amber (#fcd34d), so freezing uses
+            // a more saturated blue and the room reference uses orange, not yellow.
+            const TEMP_REFERENCES = [
+                { valueC: 0,  color: '#38bdf8' },  // 0 °C  / 32 °F -- freezing
+                { valueC: 24, color: '#fb923c' }   // 24 °C / 75 °F -- room temperature
+            ];
+
+            const referenceLines = TEMP_REFERENCES.map(ref => {
+                const v = displayTemp(ref.valueC);
+                // Strictly inside the plot; a reference on the boundary would look like a frame.
+                if (!(v > minV && v < maxV)) return '';
+                const y = toY(v).toFixed(1);
+                return `<line x1="${pad.left}" y1="${y}" x2="${W - pad.right}" y2="${y}" stroke="${ref.color}" stroke-opacity="0.8" stroke-width="1.2" stroke-dasharray="5 4"/>`;
+            }).join('');
+
             const filterId = `${gradientId}-ts`;
             const makeLabel = (text, x, y) => {
                 const tw = estWidth(text, valFont);
@@ -1608,7 +1636,7 @@
                         <feDropShadow dx="0" dy="0" stdDeviation="1.5" flood-color="rgba(5,10,20,0.95)" flood-opacity="1"/>
                     </filter>
                 </defs>
-                ${grid}${bandLayer}
+                ${grid}${referenceLines}${bandLayer}
                 <path d="${highPath}" fill="none" stroke="${highColor}" stroke-width="${tight ? 1.8 : 2.2}" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.9"/>
                 ${dotsHtml}
                 ${valueLabels}
