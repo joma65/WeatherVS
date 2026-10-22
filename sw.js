@@ -1,13 +1,15 @@
-// v25: the window-edge sample is geometry only. It used to be an ordinary point flagged
-// `interpolated`, so the hourly view drew seven dots and seven value labels but only six clock
-// labels -- the seventh tick had no icon to sit above, and the label it would have carried
-// just repeats the hour of the reading before it. It now stretches the line and the band to
-// the six-hour mark and gets no dot, value label, tick or icon, so dots, labels and icons are
-// one-per-reading by construction. formatHourLabel also prints minutes when the city's UTC
-// offset is not a whole hour (Newfoundland is -2:30 in summer), where "8 AM" was labelling an
-// 8:30 sample. index.html changed, so the cache moves.
+// v26: the plot floor now clears the lowest dot. A dot is drawn around its centre, so a series
+// whose minimum lands on the floor -- the normal case, since the scale is built from the data's
+// own min and max -- had its lower half reaching into the x-axis tick row and printing over the
+// hour label beneath it. Only the below-lane value label reserved that space, and the hourly
+// One Call view has no band, so nothing did. index.html changed, so the cache moves.
 //
-// v24: x-axis ticks are anchored to the data points instead of an independent hourly grid.
+// v25: the window-edge sample is geometry only. It stretches the line and the band to the
+// six-hour mark with no dot, value label, clock label or icon, so dots, labels and icons are
+// one-per-reading. Clock labels also print minutes when the city's UTC offset is not a whole
+// hour (Newfoundland is -2:30 in summer), where "8 AM" was labelling an 8:30 sample.
+//
+// v24: x-axis ticks anchored to the data points instead of an independent hourly grid.
 // Generating them from `t0 + n * 3600` put every label a few pixels away from the icon beneath
 // it and put the right-most tick on a sample that carries no condition.
 //
@@ -88,7 +90,7 @@
 // network-first navigations from stale-while-revalidate assets (#2); v8 replaced
 // cache.addAll() with per-asset add (#1a). v7 and older served everything cache-first and
 // aborted install on any failed asset.
-const CACHE_NAME = 'weather-compare-v25';
+const CACHE_NAME = 'weather-compare-v26';
 const ASSETS_TO_CACHE = [
   './',
 './index.html',
