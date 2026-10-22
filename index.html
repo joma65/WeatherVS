@@ -14,12 +14,11 @@
     <meta name="apple-mobile-web-app-title" content="WeatherVS">
 
     <!-- PWA/Browser Icon -->
-    <!-- Pointing to PUBLIC EXTERNAL URL to bypass local Auth/Login screens -->
     <link rel="apple-touch-icon" href="icon.png">
     <link rel="icon" type="image/png" href="icon.png">
 
-    <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@1.61.0/dist/umd/lucide.min.js"></script>
+
     <style>
         /* Custom scrollbar for webkit */
         ::-webkit-scrollbar { width: 8px; }
@@ -37,7 +36,12 @@
         .trend-toggle:focus-visible,
         .flip-toggle:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
 
-        /* Flip controls are <button> elements, so strip the UA button chrome and inherit text. */
+        /* Flip controls are <button> elements, so strip the UA button chrome and inherit text.
+           This rule deliberately collides with utilities the buttons also carry (color, font,
+           padding, border), which is only safe because the compiled stylesheet is linked AFTER
+           this block -- equal specificity means source order decides, and the utilities must
+           win. Load tailwind.css before this <style> and the text colour, the top padding and
+           the separator line all silently revert to the values here. */
         .flip-toggle {
             background: none;
             border: 0;
@@ -126,6 +130,12 @@
             #compareBtn:active { transform: none; }
         }
     </style>
+
+    <!-- Compiled Tailwind. MUST stay after the <style> block above: the two collide on
+         single-class selectors (.flip-toggle vs text-blue-100 / pt-3 / border-t) and source
+         order is the only tiebreaker. A build step that reorders these will darken every
+         .flip-toggle and strip its padding and separator. -->
+    <link rel="stylesheet" href="tailwind.css">
 </head>
 <body class="bg-slate-50 text-slate-800 min-h-screen flex flex-col font-sans selection:bg-blue-100">
 
@@ -772,7 +782,7 @@
                     oneCallRejectedKey = apiKey;
                 }
             }
-            return fetchFromLegacy(city);
+            return await fetchFromLegacy(city);
         }
 
         // One Call and the 2.5 endpoints both report the condition as an array of short objects.
@@ -787,18 +797,8 @@
             };
         }
 
-        // --- Trend windows and thresholds ---
+        // --- The hourly window ---
         const HOURLY_WINDOW_HOURS = 6;
-
-        // A sample this close to "now" would be drawn on top of the observation dot. One Call's
-        // hourly grid is fine enough that a nearby reading differs by very little, so the only
-        // problem is the two markers touching -- a few pixels of separation is enough.
-        const IMMINENT_HOURLY_SECONDS = 5 * 60;
-
-        // The 3-hourly fallback is a coarser grid: a bucket a few minutes out is drawn a few
-        // pixels from the left edge, and the segment rising out of the observation becomes a
-        // near-vertical spike rather than a trend. Half a bucket is the threshold.
-        const IMMINENT_BUCKET_SECONDS = 90 * 60;
 
         // Formats a sample time in the city's local zone. Minutes are included when the zone is
         // not a whole-hour offset -- Newfoundland is -2:30 in summer, so its hourly samples fall
@@ -831,9 +831,16 @@
         // collapses its band (highC === lowC), which the chart detects and renders as a single
         // measured line rather than a zero-width fill.
         function buildHourlyTemps(current, hourlyList) {
-            const now = Math.floor(Date.now() / 1000);
-            const t0 = now;
-            const t1 = now + HOURLY_WINDOW_HOURS * 3600;
+            // The window is anchored to the top of the current hour, not to the exact instant of
+            // the request. Anchoring to `now` made every position a function of the wall clock:
+            // as the hour advanced, the first bucket slid from a full slot down to a couple of
+            // pixels, crowding its label against "Now" until the thinner dropped one of them
+            // entirely, while the last bucket pulled in from the right edge and opened a widening
+            // unlabelled gap there. Both bucket slots and the label row are now fixed for the
+            // whole hour and change once, when the hour does.
+            const nowSeconds = Math.floor(Date.now() / 1000);
+            const t0 = nowSeconds - (nowSeconds % 3600);
+            const t1 = t0 + HOURLY_WINDOW_HOURS * 3600;
 
             const readings = (hourlyList || [])
                 .filter(h => h && typeof h.dt === 'number' && typeof h.temp === 'number')
@@ -861,18 +868,24 @@
                 return last.tempC;
             };
 
+            // Buckets strictly after the top of the hour, up to the horizon. The bucket that
+            // falls ON the top of the hour is skipped on purpose: it describes the hour already
+            // running, and the observation at slot 0 represents that hour with a measured value.
             const inWindow = readings.filter(r => r.dt > t0 && r.dt <= t1);
-
-            // The guard on length keeps at least one real reading to draw: if the imminent one is
-            // the only sample in the window, dropping it would leave a lone observation.
-            const dropLeading = inWindow.length > 1 && (inWindow[0].dt - t0) < IMMINENT_HOURLY_SECONDS;
-            const plotted = dropLeading ? inWindow.slice(1) : inWindow;
 
             const nowTempC = typeof current?.main?.temp === 'number' ? current.main.temp : readings[0].tempC;
             const tz = current?.timezone;
 
-            // The observation carries the CURRENT condition, not an interpolated one. That is a
-            // real reading from the same response, so the "Now" icon is as measured as its value.
+            // The observation is plotted at the left edge: its `dt` is set to t0, the top of the
+            // hour, not the second it was measured, so it always occupies slot 0 while each
+            // bucket occupies its own slot. Its temperature is still the measured one.
+            //
+            // That pinning is what keeps the first segment from collapsing. Placed at its true
+            // offset, the observation sat a few pixels left of the first bucket late in the hour
+            // and the line between them went near-vertical -- a spike rather than a trend. That
+            // spike is why an "imminent bucket" filter used to exist; with every point on its own
+            // slot the segment always spans a full slot, so the filter is gone and no forecast
+            // hour is ever dropped for being too close.
             const points = [{
                 dt: t0,
                 tempC: nowTempC,
@@ -884,7 +897,7 @@
                 ...conditionOf(current)
             }];
 
-            plotted.forEach(r => {
+            inWindow.forEach(r => {
                 points.push({
                     dt: r.dt,
                     tempC: r.tempC,
@@ -896,19 +909,11 @@
                 });
             });
 
-            // Extend the line to the window edge so the plot covers the full six hours instead of
-            // stopping at the last whole hour. This is a `tail`, not a point: the chart draws it
-            // as part of the line and the band, but gives it no dot, no value label, no clock tick
-            // and no condition icon.
-            //
-            // It used to be an ordinary point flagged `interpolated`, which made the counts
-            // disagree: seven dots and seven value labels against six clock labels, because a tick
-            // there had no icon to sit above -- and the label it would have carried ("11 AM")
-            // merely repeats the hour of the reading before it. Geometry is all it is entitled to.
-            //
-            // Only added when the horizon is bracketed by real readings: if the response stops
-            // short, ending the line at the last real reading is honest, whereas extending it
-            // would invent a flat segment.
+            // With a complete hourly series the last bucket IS the horizon, so this does nothing.
+            // It exists for a truncated one: the axis then ends on the last real reading rather
+            // than inventing a flat segment. A `tail` is geometry only -- the chart gives it no
+            // dot, value label, clock tick or condition icon, so the three label rows keep
+            // counting one per reading.
             const lastPoint = points[points.length - 1];
             const lastReading = readings[readings.length - 1];
             if (lastPoint.dt < t1 && t1 <= lastReading.dt) {
@@ -928,15 +933,15 @@
         // --- Hourly: 3-hourly buckets (fallback) ---
         // The shape this app used before One Call. A 6 h window holds at most two real buckets,
         // so the line between them is the interpolation -- no synthetic hourly points are
-        // invented. Points are the observation and every real bucket in the window, with the same
-        // geometry-only tail on the horizon.
+        // invented. Same anchoring as the primary path: observation at slot 0, each bucket on its
+        // own slot, geometry-only tail on the horizon.
         //
         // Unlike the One Call path, each real bucket here carries its own temp_min/temp_max, so
         // the shaded band has a real envelope and the chart will render it.
         function buildHourlyTempsFromBuckets(current, forecastList) {
-            const now = Math.floor(Date.now() / 1000);
-            const t0 = now;
-            const t1 = now + HOURLY_WINDOW_HOURS * 3600;
+            const nowSeconds = Math.floor(Date.now() / 1000);
+            const t0 = nowSeconds - (nowSeconds % 3600);
+            const t1 = t0 + HOURLY_WINDOW_HOURS * 3600;
 
             const buckets = (forecastList || [])
                 .filter(item => item && typeof item.dt === 'number' && item.main && typeof item.main.temp === 'number')
@@ -974,12 +979,6 @@
 
             const inWindow = buckets.filter(b => b.dt > t0 && b.dt <= t1);
 
-            // An imminent bucket stays in `buckets`, so it still shapes the tail, but it is not
-            // plotted: sitting a few pixels from the left edge it would produce a near-vertical
-            // spike out of the observation instead of a trend line.
-            const dropLeading = inWindow.length > 1 && (inWindow[0].dt - t0) < IMMINENT_BUCKET_SECONDS;
-            const plotted = dropLeading ? inWindow.slice(1) : inWindow;
-
             const nowTempC = typeof current?.main?.temp === 'number' ? current.main.temp : buckets[0].tempC;
             const tz = current?.timezone;
 
@@ -996,7 +995,7 @@
                 ...conditionOf(current)
             }];
 
-            plotted.forEach(b => {
+            inWindow.forEach(b => {
                 points.push({
                     dt: b.dt,
                     tempC: b.tempC,
@@ -1008,6 +1007,8 @@
                 });
             });
 
+            // The horizon is not a bucket on this grid -- buckets are 3 h apart, the window is
+            // 6 h wide -- so a tail is normally needed here to reach the right edge.
             const lastPoint = points[points.length - 1];
             const lastBucket = buckets[buckets.length - 1];
             if (lastPoint.dt < t1 && t1 <= lastBucket.dt) {
@@ -1348,10 +1349,13 @@
             // --- X-axis furniture ---
             // One tick per reading, anchored to that reading's own x position. Ticks used to be
             // generated from an independent hourly grid (`t0 + n * 3600`), which placed every
-            // label at a time the data does not occupy: the grid starts at the instant of the
-            // request rather than on a clock boundary, and a zone whose offset is not a whole
-            // hour shifts it again. The tail is skipped because it is not a reading -- it has no
-            // icon to sit above, and its clock label would repeat the preceding hour's.
+            // label at a time the data does not occupy. The tail is skipped because it is not a
+            // reading -- it has no icon to sit above, and its clock label would repeat the
+            // preceding hour's.
+            //
+            // Because the builders now anchor the window to the top of the hour, these positions
+            // are fixed fractions of the width for the whole hour: slot 0 is "Now", each bucket
+            // takes the next slot, and nothing drifts between refreshes.
             const tickItems = [];
             points.forEach((p, i) => {
                 if (p.tail) return;
