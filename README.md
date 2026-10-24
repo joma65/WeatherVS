@@ -269,10 +269,12 @@ near-vertical. That is why every segment now spans at least one slot, and why th
 "imminent bucket" filters could be deleted rather than tuned — no forecast hour is dropped for
 being too close.
 
-Under One Call the samples are hourly; under the fallback they are 3-hourly, so a six-hour window
-holds at most two of them and the line between them is the interpolation. The subtitle always
-names which it is — "Next 6 hrs · hourly" versus "Next 6 hrs · 3-hourly" — because a coarser
-chart should be attributable to the key, not look like a bug.
+Both sources sample once per hour, so the axis has seven evenly spaced slots either way. One
+Call supplies those hourly readings directly; the 3-hourly fallback interpolates its buckets onto
+the same slots, because plotting only the real buckets put two points at 2/6 and 5/6 of the width
+and left the rest of the axis empty. A slot that coincides with a bucket keeps that bucket's own
+values and condition; interpolated slots carry no condition, since a weather condition does not
+average.
 
 Clock labels include minutes when the city's UTC offset is not a whole hour. Newfoundland is
 −2:30 in summer, so its hourly samples land on the half hour, and printing "8 AM" for an 8:30
@@ -445,6 +447,8 @@ you bump it, and never reuse a name.
 
 | Version | Change |
 |---|---|
+| `v33` | The 3-hourly fallback samples its curve once per hour instead of plotting only the real buckets, so both sources produce the same seven evenly spaced axis slots. |
+| `v32` | Spacing beneath the current-conditions stats grid, so the fallback note no longer sits flush against it. |
 | `v31` | Two temperature references on the chart: freezing (0 °C / 32 °F, saturated blue) and room temperature (24 °C / ≈75 °F, orange). Declared in source Celsius like the domain, so they sit at the same height in either unit; drawn under the band, skipped rather than clamped when off-scale. |
 | `v30` | The vertical scale is fixed at 0–100 °F (stated in source Celsius so both units draw identical geometry) instead of fitted to the data. It widens to include readings outside the band plus a margin, and fits a series lying entirely outside it. A fitted domain made small changes look significant and gave each card its own invisible scale, so side-by-side slopes were not comparable. |
 | `v29` | The hourly window is anchored to the top of the current hour and the observation is pinned to slot 0, so positions are fixed for the whole hour: no label drift, no crowding, no lost hour. The imminent-bucket filters are gone, because slot spacing prevents the spike they existed to hide. |

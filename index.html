@@ -931,17 +931,26 @@
         }
 
         // --- Hourly: 3-hourly buckets (fallback) ---
-        // The shape this app used before One Call. A 6 h window holds at most two real buckets,
-        // so the line between them is the interpolation -- no synthetic hourly points are
-        // invented. Same anchoring as the primary path: observation at slot 0, each bucket on its
-        // own slot, geometry-only tail on the horizon.
+        // The free endpoint is 3-hourly, but the axis is hourly -- the same seven slots the
+        // primary path plots.
         //
-        // Unlike the One Call path, each real bucket here carries its own temp_min/temp_max, so
-        // the shaded band has a real envelope and the chart will render it.
+        // Plotting only the real buckets put them wherever the grid happened to fall: a six-hour
+        // window starting at the top of the hour holds buckets two and five hours in, so those two
+        // points landed at 2/6 and 5/6 of the width while the rest of the axis sat empty. The
+        // labels looked arbitrary next to the hourly card's evenly spaced ones, and the line was
+        // governed by the bucket grid rather than by the window.
+        //
+        // So the buckets are treated as a curve and sampled once per hour. Every sample's
+        // temperature and envelope are interpolated from the two buckets that bracket it, which is
+        // the same interpolation the line already drew between them -- there is no new claim about
+        // the weather, only a point at each hour instead of at each third hour.
+        //
+        // A slot that coincides with a bucket takes that bucket's own values and its condition.
+        // Interpolated slots carry NO condition: a weather condition does not average, and there
+        // is no such thing as half-cloudy between 4 PM and 5 PM.
         function buildHourlyTempsFromBuckets(current, forecastList) {
             const nowSeconds = Math.floor(Date.now() / 1000);
             const t0 = nowSeconds - (nowSeconds % 3600);
-            const t1 = t0 + HOURLY_WINDOW_HOURS * 3600;
 
             const buckets = (forecastList || [])
                 .filter(item => item && typeof item.dt === 'number' && item.main && typeof item.main.temp === 'number')
@@ -977,49 +986,63 @@
                 return last[field];
             };
 
-            const inWindow = buckets.filter(b => b.dt > t0 && b.dt <= t1);
+            // Buckets sit on the UTC three-hour grid. A city on a half-hour offset (Newfoundland
+            // is -2:30 in summer) puts the local slots half an hour off that grid, so an exact
+            // timestamp match would never succeed and every slot would silently lose its
+            // condition. Nearest bucket within half a slot is the bucket that owns the hour.
+            const SLOT_MATCH_SECONDS = 30 * 60;
+            const bucketNear = t => {
+                let best = null;
+                let bestGap = Infinity;
+                for (const b of buckets) {
+                    const gap = Math.abs(b.dt - t);
+                    if (gap < bestGap) { bestGap = gap; best = b; }
+                }
+                return bestGap <= SLOT_MATCH_SECONDS ? best : null;
+            };
 
             const nowTempC = typeof current?.main?.temp === 'number' ? current.main.temp : buckets[0].tempC;
             const tz = current?.timezone;
+            const lastBucket = buckets[buckets.length - 1];
 
-            // "Now" is a single reading, not a window: the observation reports one temperature
-            // and no meaningful spread. The band starts collapsed on it and fans out to the first
-            // forecast bucket, so the left-hand point means what it says.
             const points = [{
                 dt: t0,
                 tempC: nowTempC,
                 highC: nowTempC,
                 lowC: nowTempC,
                 label: 'Now',
+                // Observations have no spread: one temperature, one marker, one value.
                 observed: true,
                 ...conditionOf(current)
             }];
 
-            inWindow.forEach(b => {
-                points.push({
-                    dt: b.dt,
-                    tempC: b.tempC,
-                    highC: b.highC,
-                    lowC: b.lowC,
-                    label: formatHourLabel(b.dt, tz),
-                    condId: b.condId,
-                    condMain: b.condMain
-                });
-            });
+            for (let h = 1; h <= HOURLY_WINDOW_HOURS; h++) {
+                const t = t0 + h * 3600;
 
-            // The horizon is not a bucket on this grid -- buckets are 3 h apart, the window is
-            // 6 h wide -- so a tail is normally needed here to reach the right edge.
-            const lastPoint = points[points.length - 1];
-            const lastBucket = buckets[buckets.length - 1];
-            if (lastPoint.dt < t1 && t1 <= lastBucket.dt) {
-                points.push({
-                    dt: t1,
-                    tempC: at('tempC', t1),
-                    highC: at('highC', t1),
-                    lowC: at('lowC', t1),
-                    label: formatHourLabel(t1, tz),
-                    tail: true
-                });
+                // Nothing to interpolate past the final bucket. Stopping is honest; carrying the
+                // last value forward would draw a flat segment the forecast never claimed.
+                if (t > lastBucket.dt) break;
+
+                const bucket = bucketNear(t);
+                if (bucket) {
+                    points.push({
+                        dt: t,
+                        tempC: bucket.tempC,
+                        highC: bucket.highC,
+                        lowC: bucket.lowC,
+                        label: formatHourLabel(t, tz),
+                        condId: bucket.condId,
+                        condMain: bucket.condMain
+                    });
+                } else {
+                    points.push({
+                        dt: t,
+                        tempC: at('tempC', t),
+                        highC: at('highC', t),
+                        lowC: at('lowC', t),
+                        label: formatHourLabel(t, tz)
+                    });
+                }
             }
 
             return points;
@@ -1347,15 +1370,14 @@
             }
 
             // --- X-axis furniture ---
-            // One tick per reading, anchored to that reading's own x position. Ticks used to be
-            // generated from an independent hourly grid (`t0 + n * 3600`), which placed every
-            // label at a time the data does not occupy. The tail is skipped because it is not a
-            // reading -- it has no icon to sit above, and its clock label would repeat the
-            // preceding hour's.
+            // One tick per reading, anchored to that reading's own x position. The tail is
+            // skipped because it is not a reading -- it has no icon to sit above, and its clock
+            // label would repeat the preceding hour's.
             //
-            // Because the builders anchor the window to the top of the hour, these positions are
-            // fixed fractions of the width for the whole hour: slot 0 is "Now", each bucket takes
-            // the next slot, and nothing drifts between refreshes.
+            // Because both builders anchor the window to the top of the hour and place one point
+            // per hour, these positions are fixed fractions of the width for the whole hour:
+            // slot 0 is "Now", each hour takes the next slot, and nothing drifts between
+            // refreshes -- on either data source.
             const tickItems = [];
             points.forEach((p, i) => {
                 if (p.tail) return;
