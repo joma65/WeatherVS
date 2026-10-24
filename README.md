@@ -447,6 +447,7 @@ you bump it, and never reuse a name.
 
 | Version | Change |
 |---|---|
+| `v34` | The 3-hourly fallback reads only the three buckets that bracket the window, and folds the observation in as the first interpolation sample — so the hours before the first bucket ramp out of the measured reading instead of stepping flat to it. The third bucket is an interpolation endpoint only and is never plotted. |
 | `v33` | The 3-hourly fallback samples its curve once per hour instead of plotting only the real buckets, so both sources produce the same seven evenly spaced axis slots. |
 | `v32` | Spacing beneath the current-conditions stats grid, so the fallback note no longer sits flush against it. |
 | `v31` | Two temperature references on the chart: freezing (0 °C / 32 °F, saturated blue) and room temperature (24 °C / ≈75 °F, orange). Declared in source Celsius like the domain, so they sit at the same height in either unit; drawn under the band, skipped rather than clamped when off-scale. |

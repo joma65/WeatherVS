@@ -557,8 +557,9 @@
         const CURRENT_URL = 'https://api.openweathermap.org/data/2.5/weather';
         const FORECAST_URL = 'https://api.openweathermap.org/data/2.5/forecast';
 
-        // 2.5 forecast buckets, 3 h each -> the endpoint's maximum, 5 days. Enough to always
-        // produce four local calendar dates regardless of the city's UTC offset.
+        // 2.5 forecast buckets, 3 h each -> the endpoint's maximum, 5 days. The hourly view reads
+        // only the first three of these; the rest are for the daily view, which needs four local
+        // calendar dates and therefore as much horizon as the endpoint will give.
         const FORECAST_BUCKETS = 40;
 
         // The key One Call has refused, remembered for the session so that every comparison does
@@ -800,6 +801,14 @@
         // --- The hourly window ---
         const HOURLY_WINDOW_HOURS = 6;
 
+        // How many 3-hourly buckets the fallback reads for the hourly view. Three is the most the
+        // window can need: `t0` is on an hour boundary while buckets sit on the 3-hour UTC grid,
+        // so the first falls 1-3 h out and the third 7-9 h out. The third is therefore never
+        // plotted -- it exists to be the far end of the interpolation for the slots that sit
+        // between it and the second bucket. When `t0` happens to land on the grid only two are
+        // used, and the extra one is simply ignored.
+        const HOURLY_BRACKET_BUCKETS = 3;
+
         // Formats a sample time in the city's local zone. Minutes are included when the zone is
         // not a whole-hour offset -- Newfoundland is -2:30 in summer, so its hourly samples fall
         // on the half hour and printing "8 AM" for an 8:30 reading is simply wrong. There is no
@@ -868,7 +877,7 @@
                 return last.tempC;
             };
 
-            // Buckets strictly after the top of the hour, up to the horizon. The bucket that
+            // Readings strictly after the top of the hour, up to the horizon. The reading that
             // falls ON the top of the hour is skipped on purpose: it describes the hour already
             // running, and the observation at slot 0 represents that hour with a measured value.
             const inWindow = readings.filter(r => r.dt > t0 && r.dt <= t1);
@@ -878,14 +887,11 @@
 
             // The observation is plotted at the left edge: its `dt` is set to t0, the top of the
             // hour, not the second it was measured, so it always occupies slot 0 while each
-            // bucket occupies its own slot. Its temperature is still the measured one.
+            // reading occupies its own slot. Its temperature is still the measured one.
             //
             // That pinning is what keeps the first segment from collapsing. Placed at its true
-            // offset, the observation sat a few pixels left of the first bucket late in the hour
-            // and the line between them went near-vertical -- a spike rather than a trend. That
-            // spike is why an "imminent bucket" filter used to exist; with every point on its own
-            // slot the segment always spans a full slot, so the filter is gone and no forecast
-            // hour is ever dropped for being too close.
+            // offset, the observation sat a few pixels left of the first reading late in the hour
+            // and the line between them went near-vertical -- a spike rather than a trend.
             const points = [{
                 dt: t0,
                 tempC: nowTempC,
@@ -909,7 +915,7 @@
                 });
             });
 
-            // With a complete hourly series the last bucket IS the horizon, so this does nothing.
+            // With a complete hourly series the last reading IS the horizon, so this does nothing.
             // It exists for a truncated one: the axis then ends on the last real reading rather
             // than inventing a flat segment. A `tail` is geometry only -- the chart gives it no
             // dot, value label, clock tick or condition icon, so the three label rows keep
@@ -936,14 +942,17 @@
         //
         // Plotting only the real buckets put them wherever the grid happened to fall: a six-hour
         // window starting at the top of the hour holds buckets two and five hours in, so those two
-        // points landed at 2/6 and 5/6 of the width while the rest of the axis sat empty. The
-        // labels looked arbitrary next to the hourly card's evenly spaced ones, and the line was
-        // governed by the bucket grid rather than by the window.
+        // points landed at 2/6 and 5/6 of the width while the rest of the axis sat empty. So the
+        // buckets are treated as a curve and sampled once per hour.
         //
-        // So the buckets are treated as a curve and sampled once per hour. Every sample's
-        // temperature and envelope are interpolated from the two buckets that bracket it, which is
-        // the same interpolation the line already drew between them -- there is no new claim about
-        // the weather, only a point at each hour instead of at each third hour.
+        // Only the buckets that bracket THIS window are read -- three of them, never the rest of
+        // the five-day series. The third is normally outside the window and is never plotted; it
+        // is the far end of the interpolation for the slots between it and the second bucket.
+        //
+        // The observation is folded into the sample set as the near end, at t0. Without it the
+        // slots before the first bucket would clamp to that bucket's temperature and draw a flat
+        // step after a one-slot ramp; with it they ramp out of the measured reading all the way to
+        // the first bucket, which is what the primary path does too.
         //
         // A slot that coincides with a bucket takes that bucket's own values and its condition.
         // Interpolated slots carry NO condition: a weather condition does not average, and there
@@ -967,16 +976,31 @@
             // drawing a flat line that implies six hours of data we do not have.
             if (!buckets.length) return [];
 
-            // Piecewise-linear lookup over the real buckets, by NAMED FIELD. Reading .dt/.v off
-            // values produced by a field selector is what previously made this return undefined
-            // and collapsed the whole plot outside the viewBox, so the {dt, <field>} shape stays.
+            const nowTempC = typeof current?.main?.temp === 'number' ? current.main.temp : buckets[0].tempC;
+            const tz = current?.timezone;
+
+            const bracket = buckets.filter(b => b.dt > t0).slice(0, HOURLY_BRACKET_BUCKETS);
+
+            // A series that has already run out leaves nothing to interpolate toward. Returning []
+            // lets the chart say "Trend data unavailable" rather than drawing the observation
+            // alone, which would be a single point masquerading as a forecast.
+            if (!bracket.length) return [];
+
+            const samples = [
+                { dt: t0, tempC: nowTempC, highC: nowTempC, lowC: nowTempC },
+                ...bracket
+            ];
+
+            // Piecewise-linear lookup over the samples, by NAMED FIELD. Reading .dt/.v off values
+            // produced by a field selector is what previously made this return undefined and
+            // collapsed the whole plot outside the viewBox, so the {dt, <field>} shape stays.
             const at = (field, t) => {
-                const first = buckets[0];
+                const first = samples[0];
                 if (t <= first.dt) return first[field];
-                const last = buckets[buckets.length - 1];
+                const last = samples[samples.length - 1];
                 if (t >= last.dt) return last[field];
-                for (let i = 1; i < buckets.length; i++) {
-                    const prev = buckets[i - 1], next = buckets[i];
+                for (let i = 1; i < samples.length; i++) {
+                    const prev = samples[i - 1], next = samples[i];
                     if (t <= next.dt) {
                         const gap = next.dt - prev.dt;
                         if (gap <= 0) return next[field];
@@ -986,24 +1010,22 @@
                 return last[field];
             };
 
-            // Buckets sit on the UTC three-hour grid. A city on a half-hour offset (Newfoundland
-            // is -2:30 in summer) puts the local slots half an hour off that grid, so an exact
+            // A bucket sits on the UTC three-hour grid. A city on a half-hour offset (Newfoundland
+            // is -2:30 in summer) puts the local slot half an hour off that grid, so an exact
             // timestamp match would never succeed and every slot would silently lose its
-            // condition. Nearest bucket within half a slot is the bucket that owns the hour.
+            // condition. The nearest bucket within half a slot owns the hour.
             const SLOT_MATCH_SECONDS = 30 * 60;
             const bucketNear = t => {
                 let best = null;
                 let bestGap = Infinity;
-                for (const b of buckets) {
+                for (const b of bracket) {
                     const gap = Math.abs(b.dt - t);
                     if (gap < bestGap) { bestGap = gap; best = b; }
                 }
                 return bestGap <= SLOT_MATCH_SECONDS ? best : null;
             };
 
-            const nowTempC = typeof current?.main?.temp === 'number' ? current.main.temp : buckets[0].tempC;
-            const tz = current?.timezone;
-            const lastBucket = buckets[buckets.length - 1];
+            const lastSampleDt = samples[samples.length - 1].dt;
 
             const points = [{
                 dt: t0,
@@ -1019,9 +1041,9 @@
             for (let h = 1; h <= HOURLY_WINDOW_HOURS; h++) {
                 const t = t0 + h * 3600;
 
-                // Nothing to interpolate past the final bucket. Stopping is honest; carrying the
+                // Nothing to interpolate past the last sample. Stopping is honest; carrying the
                 // last value forward would draw a flat segment the forecast never claimed.
-                if (t > lastBucket.dt) break;
+                if (t > lastSampleDt) break;
 
                 const bucket = bucketNear(t);
                 if (bucket) {
