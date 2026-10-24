@@ -1,3 +1,4 @@
+// `v32` | Spacing beneath the current-conditions stats grid, so the fallback note no longer sits flush against it.
 // v31: two temperature references drawn on the chart -- freezing (0 °C / 32 °F, saturated blue)
 // and a warm-room reference (24 °C / 75 °F, orange). Both are stated in source Celsius, like the
 // domain, so they sit at the same physical height in either unit. They are drawn after the grid
