@@ -202,50 +202,48 @@ once, not per comparison.
 Each card's back face is a trend chart drawn as an inline SVG (`buildTempChartSVG`). There is no
 chart library and no canvas. The chart has two modes, toggled by the calendar button.
 
-### The vertical scale is fixed
+### The vertical scale is a fixed-height window
 
-The domain is **0–100 °F**, stated internally in Celsius (`-160/9` to `340/9`) so both units draw
+The window is **32–75 °F**, stated internally in Celsius (`0` to `215/9`) so both units draw
 identical geometry. It is not fitted to the data.
 
 That is the point. A fitted domain made every slope interpretive — four degrees of overnight drift
 filled the plot as dramatically as a thirty-degree front — and, worse for an app built on
 comparison, each card carried its own invisible domain, so the two curves were not measured
-against the same thing.
+against the same thing. A 43-degree window spends the plot's height on temperatures people
+actually live in rather than on the empty extremes of a 0–100 range.
 
-The band is a **default, not a cage**:
+The window **adapts without changing size**:
 
-- Readings outside it widen the domain to include them, plus a 5 % margin, so an extreme day is
-  drawn against a larger range rather than clipped off the frame.
-- A series lying **entirely** outside the band is fitted to its own range instead. Holding the
-  band there would squash the whole line into a sliver against one edge, at which point the band
-  is no longer informative.
+- Readings outside it make the window **slide** to contain them. A degree stays the same number of
+  pixels on both cards and in every season, so the slopes remain comparable.
+- It only **grows** when the data itself is wider than 43 degrees, since there is no window of that
+  height that could contain it.
 
-Because the domain is fixed, the five grid lines now sit at fixed temperatures rather than at
-whatever the data happened to span, so a given height means the same thing on both cards and in
-both modes.
+Sliding rather than stretching is deliberate. Stretching to fit would make a mild day look like a
+heatwave, and the old "fit a series that lies entirely outside the band" rule would have quietly
+brought per-card scaling back the moment a summer reading passed 75 °F.
+
 
 ### Temperature references
-
-Two dashed horizontal references are drawn across the plot:
 
 | Reference | `valueC` | Metric | Imperial | Colour |
 |---|---|---|---|---|
 | Freezing | `0` | 0 °C | 32 °F | `#38bdf8` (saturated blue) |
-| Room temperature | `24` | 24 °C | ≈75 °F | `#fb923c` (orange) |
+| Room temperature | `215/9` | ≈23.9 °C | 75 °F | `#fb923c` (orange) |
 
-Both are declared in **source Celsius**, next to the domain constants, so they land at the same
-physical height in either unit — `displayTemp` converts them exactly like data. 24 °C is 75.2 °F,
-which is the "75 °F" reference as it rounds on screen; stating it in Celsius keeps one source of
-truth rather than two values that disagree by a fifth of a degree.
+These are the two temperatures the window is built from, so with no adaptation the dashed lines
+sit **exactly on its edges** — the floor of the chart is freezing, the ceiling is room
+temperature. Their visibility test is therefore inclusive, not strict: a strict interior test
+would drop both from the most common view. Once the window slides for cold or hot data, the
+relevant line moves inside the plot on its own; one the window has genuinely left behind is
+skipped rather than pinned to the border, since a line at the frame edge reads as an axis rather
+than as a temperature.
 
-They are drawn **after the grid and before the band and curves**. The fill is only 25 % opaque, so
-a dashed reference beneath it still reads, while the data stays the most prominent thing on the
-card. A reference outside the visible domain is **skipped, not clamped** — a line pinned to the
-frame edge would read as an axis rather than as a temperature.
+Colours are picked to be distinguishable from the series: the low curve is pale sky (`#7dd3fc`)
+and the high curve is amber (`#fcd34d`), so freezing uses a more saturated blue and room
+temperature uses orange rather than yellow.
 
-Colours are picked to be distinguishable from the series themselves: the low curve is pale sky
-(`#7dd3fc`) and the high curve is amber (`#fcd34d`), so freezing uses a more saturated blue and
-the room reference uses orange rather than yellow.
 
 ### Hourly view: the current hour plus the next six
 
@@ -447,6 +445,7 @@ you bump it, and never reuse a name.
 
 | Version | Change |
 |---|---|
+| `v35` | The chart window defaults to 32–75 °F, the two reference temperatures, and adapts by sliding rather than stretching so a degree stays the same number of pixels on both cards. References are drawn inclusively, since they now coincide with the window's edges by default. |
 | `v34` | The 3-hourly fallback reads only the three buckets that bracket the window, and folds the observation in as the first interpolation sample — so the hours before the first bucket ramp out of the measured reading instead of stepping flat to it. The third bucket is an interpolation endpoint only and is never plotted. |
 | `v33` | The 3-hourly fallback samples its curve once per hour instead of plotting only the real buckets, so both sources produce the same seven evenly spaced axis slots. |
 | `v32` | Spacing beneath the current-conditions stats grid, so the fallback note no longer sits flush against it. |

@@ -1425,12 +1425,11 @@
             //
             // The dot's clearance is not optional. A dot is drawn AROUND its centre, so a series
             // that reaches the bottom of the scale -- which happens whenever a reading sits at or
-            // below the fixed domain minimum, or when the domain was fitted to data that dips
-            // below the band -- has its lower half reaching into whatever comes next. With a
-            // band, the below-lane L: label occupies that space and the clearance is already
-            // implied by its offset. Without a band there is nothing between the floor and the
-            // tick row, and the dot would print over the hour beneath it. Reserving it explicitly
-            // fixes both cases without double-counting.
+            // below the window's floor -- has its lower half reaching into whatever comes next.
+            // With a band, the below-lane L: label occupies that space and the clearance is
+            // already implied by its offset. Without a band there is nothing between the floor and
+            // the tick row, and the dot would print over the hour beneath it. Reserving it
+            // explicitly fixes both cases without double-counting.
             const tickBlock = xFont + 6
                 + Math.max(0, labelRows.length - 1) * (xFont + 5)
                 + (hasCondIcons ? iconSize + 4 : 0);
@@ -1449,41 +1448,52 @@
             const plotH  = Math.max(60, Math.min(availH, Math.max(W * 1.6, 170)));
             const topY   = pad.top + Math.max(0, (availH - plotH) / 2);
 
-            // --- Vertical scale: fixed, not fitted ---
-            // The domain is 0–100 °F, stated in source Celsius so the geometry is identical in
-            // both units. Fitting the domain to the data made every slope interpretive: four
-            // degrees of overnight drift filled the plot as dramatically as a thirty-degree
-            // front, and -- worse for an app whose entire purpose is comparison -- two cards side
-            // by side each carried their own invisible domain, so their slopes were not
-            // comparable at all.
+            // --- Vertical scale: a fixed-height window, not a fitted span ---
+            // The window is 32–75 °F, stated in source Celsius so the geometry is identical in
+            // both units. Those are the two reference temperatures, so with no adaptation the
+            // dashed lines sit exactly on the window's edges: the floor of the chart IS freezing
+            // and its ceiling IS room temperature, and ordinary weather fills the space between.
             //
-            // The fixed band is a default, not a cage. Readings outside it widen the domain to
-            // include them plus a margin, so an extreme day is drawn against a larger range
-            // instead of being clipped off the frame. The one case that needs different handling
-            // is a series lying ENTIRELY outside the band: keeping the band there would squash
-            // the whole line into a sliver against one edge, so the band stops being informative
-            // and the data wins.
-            const DOMAIN_MIN_C = -160 / 9;   //   0 °F
-            const DOMAIN_MAX_C =  340 / 9;   // 100 °F
+            // Fitting the domain to the data made every slope interpretive -- four degrees of
+            // overnight drift filled the plot as dramatically as a thirty-degree front -- and,
+            // worse for an app whose whole purpose is comparison, gave each card its own invisible
+            // domain. A fixed 43-degree window spends its height on temperatures people actually
+            // live in, instead of on the 0–100 range's empty extremes.
+            //
+            // The window ADAPTS WITHOUT CHANGING SIZE. When the data leaves it, the window slides
+            // to contain the data; it only grows when the data itself is wider than 43 degrees.
+            // Sliding rather than stretching is what keeps two cards comparable: a degree is the
+            // same number of pixels on both, in any season, so the slopes still mean the same
+            // thing. Stretching to fit would make a mild day look like a heatwave, and letting a
+            // summer series fall entirely outside the band would -- under the old "fit it instead"
+            // rule -- silently bring back per-card scaling the moment the thermometer passed 75.
+            const BAND_MIN_C = 0;          // 32 °F -- freezing
+            const BAND_MAX_C = 215 / 9;    // 75 °F -- room temperature
 
-            const domainMin = displayTemp(DOMAIN_MIN_C);
-            const domainMax = displayTemp(DOMAIN_MAX_C);
-            const overflowMargin = (domainMax - domainMin) * 0.05;
+            const bandMin = displayTemp(BAND_MIN_C);
+            const bandMax = displayTemp(BAND_MAX_C);
+            const bandWidth = bandMax - bandMin;
+            const bandMargin = bandWidth * 0.05;
 
             const dataMin = Math.min(...lowVals);
             const dataMax = Math.max(...highVals);
 
-            let minV = domainMin;
-            let maxV = domainMax;
+            let minV = bandMin;
+            let maxV = bandMax;
 
-            if (dataMin > domainMax || dataMax < domainMin) {
-                // Whole series outside the band: fit it, with the same relative margin.
-                minV = dataMin - overflowMargin;
-                maxV = dataMax + overflowMargin;
-            } else {
-                if (dataMin < domainMin) minV = dataMin - overflowMargin;
-                if (dataMax > domainMax) maxV = dataMax + overflowMargin;
+            if (dataMax - dataMin >= bandWidth) {
+                // Wider than the window can hold: only here does it stretch.
+                minV = dataMin - bandMargin;
+                maxV = dataMax + bandMargin;
+            } else if (dataMin < bandMin) {
+                minV = dataMin - bandMargin;
+                maxV = minV + bandWidth;
+            } else if (dataMax > bandMax) {
+                maxV = dataMax + bandMargin;
+                minV = maxV - bandWidth;
             }
+            // Both edges cannot escape at once without the data being wider than the window,
+            // which the first branch already handled.
 
             const span = (maxV - minV) || 1;
             const toY  = v => topY + (1 - (v - minV) / span) * plotH;
@@ -1499,38 +1509,42 @@
             const lowPath = splinePath(lPts, 'M');
             const bandPath = `${highPath} ${splinePath([...lPts].reverse(), 'L')} Z`;
 
-            // Grid lines. With a fixed domain these now sit at fixed temperatures rather than at
-            // whatever the data happened to span, so a given height means the same thing on both
-            // cards and on both views.
+            // Grid lines. With a fixed-height window these sit at fixed fractions of 43 degrees
+            // rather than at whatever the data happened to span, so the spacing between them is
+            // the same on both cards and in both seasons.
             const grid = [0, 0.25, 0.5, 0.75, 1].map(r => {
                 const y = (topY + r * plotH).toFixed(1);
                 return `<line x1="${pad.left}" y1="${y}" x2="${W - pad.right}" y2="${y}" stroke="rgba(255,255,255,0.15)" stroke-width="1" stroke-dasharray="3 4"/>`;
             }).join('');
 
             // --- Temperature references ---
-            // Two fixed temperatures worth seeing at a glance: freezing (0 °C / 32 °F) and a
-            // warm-room reference (24 °C / ~75 °F). Both are stated in source Celsius, like the
-            // domain, so they land at the same physical height in either unit -- and because the
-            // domain is fixed, the same height on both cards and in both modes.
+            // The same two temperatures that define the window: freezing (32 °F / 0 °C) and room
+            // temperature (75 °F / 23.9 °C). Stated in Celsius, like the window, so they land at
+            // the same physical height in either unit.
             //
             // They sit after the grid and BEFORE the band and curves. The fill is only 25%
             // opaque, so a dashed line beneath it still reads, while the data stays the most
-            // prominent thing on the card. A reference outside the visible domain is skipped
-            // rather than clamped to the frame edge: a line pinned to the border would read as an
-            // axis rather than as a temperature.
+            // prominent thing on the card.
             //
-            // Colours are chosen to be distinguishable from the series themselves -- the low
-            // curve is pale sky (#7dd3fc) and the high curve is amber (#fcd34d), so freezing uses
-            // a more saturated blue and the room reference uses orange, not yellow.
+            // Inclusive bounds, deliberately: by default these ARE the window's edges, so the
+            // strict interior test this used to have would drop both lines from the most common
+            // view. They coincide with the plot's top and bottom grid lines there, which reads as
+            // "this band runs from freezing to room temperature" -- and once the window slides
+            // for cold or hot data, the relevant one moves inside the plot on its own. A
+            // reference the window has genuinely left behind is still skipped rather than pinned
+            // to the frame edge, since a line at the border reads as an axis, not a temperature.
+            //
+            // Colours are chosen to be distinguishable from the series themselves -- the low curve
+            // is pale sky (#7dd3fc) and the high curve is amber (#fcd34d), so freezing uses a more
+            // saturated blue and room temperature uses orange, not yellow.
             const TEMP_REFERENCES = [
-                { valueC: 0,  color: '#38bdf8' },  // 0 °C  / 32 °F -- freezing
-                { valueC: 24, color: '#fb923c' }   // 24 °C / 75 °F -- room temperature
+                { valueC: BAND_MIN_C, color: '#38bdf8' },  // 32 °F -- freezing
+                { valueC: BAND_MAX_C, color: '#fb923c' }   // 75 °F -- room temperature
             ];
 
             const referenceLines = TEMP_REFERENCES.map(ref => {
                 const v = displayTemp(ref.valueC);
-                // Strictly inside the plot; a reference on the boundary would look like a frame.
-                if (!(v > minV && v < maxV)) return '';
+                if (v < minV || v > maxV) return '';
                 const y = toY(v).toFixed(1);
                 return `<line x1="${pad.left}" y1="${y}" x2="${W - pad.right}" y2="${y}" stroke="${ref.color}" stroke-opacity="0.8" stroke-width="1.2" stroke-dasharray="5 4"/>`;
             }).join('');
